@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SupplyShield Dashboard</title>
+    <style>
+        :root {
+            --bg-dark: #0f172a;
+            --bg-panel: #1e293b;
+            --text-light: #f8fafc;
+            --text-muted: #94a3b8;
+            --accent-primary: #3b82f6;
+            --accent-hover: #2563eb;
+            --status-danger: #ef4444;
+            --status-success: #10b981;
+            --border-color: #334155;
+            --radius-md: 0.5rem;
+            --radius-lg: 1rem;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-dark);
+            color: var(--text-light);
+            margin: 0;
+            padding: 2rem;
+            display: flex;
+            justify-content: center;
+        }
+
+        .container {
+            max-width: 1200px;
+            width: 100%;
+            display: grid;
+            grid-template-columns: 350px 1fr;
+            gap: 2rem;
+        }
+
+        header {
+            grid-column: 1 / -1;
+            margin-bottom: 1rem;
+            text-align: center;
+        }
+
+        header h1 {
+            font-size: 2.5rem;
+            margin: 0;
+            background: linear-gradient(135deg, #60a5fa, #c084fc);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        header p {
+            color: var(--text-muted);
+            margin-top: 0.5rem;
+        }
+
+        .panel {
+            background-color: var(--bg-panel);
+            border-radius: var(--radius-lg);
+            padding: 1.5rem;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5);
+            border: 1px solid var(--border-color);
+        }
+
+        .panel-title {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-top: 0;
+            margin-bottom: 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .form-group {
+            margin-bottom: 1.25rem;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-size: 0.875rem;
+            color: var(--text-muted);
+        }
+
+        input[type="number"], select {
+            width: 100%;
+            padding: 0.75rem;
+            background-color: var(--bg-dark);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-md);
+            color: var(--text-light);
+            font-size: 1rem;
+            box-sizing: border-box;
+        }
+
+        input:focus, select:focus {
+            outline: none;
+            border-color: var(--accent-primary);
+        }
+
+        button {
+            width: 100%;
+            padding: 0.875rem;
+            background-color: var(--accent-primary);
+            color: white;
+            border: none;
+            border-radius: var(--radius-md);
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+        button:hover {
+            background-color: var(--accent-hover);
+        }
+
+        /* Results Area */
+        .results-container {
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+        }
+
+        .status-card {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 2rem;
+            background: linear-gradient(135deg, rgba(30, 41, 59, 0.8), rgba(15, 23, 42, 0.9));
+            border-left: 5px solid var(--status-success);
+        }
+
+        .status-card.delayed {
+            border-left-color: var(--status-danger);
+        }
+
+        .status-text h2 {
+            margin: 0;
+            font-size: 2rem;
+        }
+
+        .status-prob {
+            font-size: 1.25rem;
+            color: var(--text-muted);
+            margin-top: 0.5rem;
+        }
+
+        .drivers-list {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+
+        .driver-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 1rem;
+            background-color: var(--bg-dark);
+            border-radius: var(--radius-md);
+            margin-bottom: 0.75rem;
+            border-left: 3px solid var(--status-danger);
+        }
+
+        .driver-item.decreases {
+            border-left-color: var(--status-success);
+        }
+
+        .driver-name {
+            font-weight: 600;
+            text-transform: capitalize;
+        }
+
+        .driver-impact {
+            font-family: monospace;
+            font-size: 1.1rem;
+        }
+
+        .guidance-list {
+            padding-left: 1.5rem;
+            color: #e2e8f0;
+            line-height: 1.6;
+        }
+
+        .guidance-list li {
+            margin-bottom: 0.75rem;
+        }
+
+        .hidden {
+            display: none !important;
+        }
+
+        .loader {
+            border: 4px solid var(--bg-dark);
+            border-top: 4px solid var(--accent-primary);
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin: 2rem auto;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        /* Mock data warning */
+        .mock-warning {
+            grid-column: 1 / -1;
+            background-color: rgba(245, 158, 11, 0.1);
+            border: 1px solid rgba(245, 158, 11, 0.3);
+            color: #fbbf24;
+            padding: 1rem;
+            border-radius: var(--radius-md);
+            text-align: center;
+            font-size: 0.875rem;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <header>
+            <h1>SupplyShield</h1>
+            <p>Federated Supply Chain Risk Intelligence & Guidance</p>
+        </header>
+
+        <div class="mock-warning">
+            Note: This dashboard interacts with the global FL model. Feature inputs here are raw inputs, 
+            which are mapped to the scaled/encoded format expected by the model for demonstration purposes.
+        </div>
+
+        <!-- Input Form -->
+        <div class="panel">
+            <h2 class="panel-title">Shipment Details</h2>
+            <form id="prediction-form">
+                
+                <div class="form-group">
+                    <label for="distance">Distance (km)</label>
+                    <input type="number" id="distance" value="45.5" step="0.1" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="weather">Weather Conditions</label>
+                    <select id="weather">
+                        <option value="0">Clear</option>
+                        <option value="1">Cloudy</option>
+                        <option value="2">Rain</option>
+                        <option value="3" selected>Storm</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="traffic">Traffic Level</label>
+                    <select id="traffic">
+                        <option value="0">Light</option>
+                        <option value="1">Moderate</option>
+                        <option value="2" selected>Heavy</option>
+                        <option value="3">Severe</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="vehicle">Vehicle Type</label>
+                    <select id="vehicle">
+                        <option value="0">Van</option>
+                        <option value="1" selected>Truck</option>
+                        <option value="2">Semi-Trailer</option>
+                    </select>
+                </div>
+
+                <button type="submit">Analyze Risk & Get Guidance</button>
+            </form>
+        </div>
+
+        <!-- Results Area -->
+        <div class="results-container">
+            
+            <div id="loading" class="panel hidden">
+                <div class="loader"></div>
+                <p style="text-align: center; color: var(--text-muted);">Analyzing global federated model and generating AI guidance...</p>
+            </div>
+
+            <div id="results" class="hidden">
+                <!-- Status Card -->
+                <div id="status-card" class="panel status-card delayed" style="margin-bottom: 1.5rem;">
+                    <div class="status-text">
+                        <h2 id="status-heading">High Risk of Delay</h2>
+                        <div class="status-prob">Probability: <span id="prob-val" style="color: var(--status-danger); font-weight: bold;">87.5%</span></div>
+                    </div>
+                    <div style="font-size: 3rem;">
+                        <span id="status-icon">⚠️</span>
+                    </div>
+                </div>
+
+                <!-- Guidance & Mitigation -->
+                <div class="panel" style="margin-bottom: 1.5rem;">
+                    <h2 class="panel-title">🤖 AI Mitigation Strategy</h2>
+                    <ul id="guidance-list" class="guidance-list">
+                        <!-- Populated by JS -->
+                    </ul>
+                </div>
+
+                <!-- SHAP Explainability -->
+                <div class="panel">
+                    <h2 class="panel-title">📊 Explainability (SHAP Top Drivers)</h2>
+                    <p style="color: var(--text-muted); font-size: 0.875rem; margin-top: -1rem; margin-bottom: 1rem;">
+                        Base expected delay risk across the network is <span id="base-val">30.0%</span>.
+                    </p>
+                    <ul id="drivers-list" class="drivers-list">
+                        <!-- Populated by JS -->
+                    </ul>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

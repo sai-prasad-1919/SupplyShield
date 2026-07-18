@@ -1,0 +1,16 @@
+{
+    "correlation": 0.928718969108535,
+    "baseline_importance": {
+        "weather": 0.4084988124370575,
+        "traffic": 0.24477227449938072,
+        "distance_km": 0.09431909295159857,
+        "vehicle_type": 0.06914394089969574
+    },
+    "global_importance": {
+        "weather": 0.4405509652495384,
+        "traffic": 0.40662906105816365,
+        "distance_km": 0.0431284685699975,
+        "vehicle_type": 0.02902399822534062
+    },
+    "rank_changed": false
+}
