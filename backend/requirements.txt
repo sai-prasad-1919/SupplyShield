@@ -5,3 +5,8 @@ torch
 shap
 pandas
 scikit-learn
+passlib[bcrypt]
+python-jose[cryptography]
+pymongo
+psycopg2-binary
+python-dotenv
