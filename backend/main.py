@@ -1,26 +1,46 @@
 import os
-import pickle
 import torch
 import torch.nn as nn
-from fastapi import FastAPI, HTTPException
+import pandas as pd
+import numpy as np
+from fastapi import FastAPI, HTTPException, Query, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from sklearn.preprocessing import LabelEncoder
-from pydantic import BaseModel
-from typing import List, Dict, Any
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from jose import JWTError, jwt
+from typing import Optional
+
+from backend.guidance.rules import evaluate_rules
+from backend.auth.routes import router as auth_router, get_current_org
 
 # Ensure we're in the correct root directory
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CHECKPOINTS_DIR = os.path.join(ROOT_DIR, "checkpoints")
+DATA_PARTITIONS_DIR = os.path.join(ROOT_DIR, "data", "partitions")
 
-app = FastAPI(title="SupplyShield API", version="1.0.0")
+app = FastAPI(title="SupplyShield API v2", version="2.0.0")
+
+# Include auth routes
+app.include_router(auth_router)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5174",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ----------------- Configuration -----------------
+ORG_CONFIG = {
+    "novamart": {"display_name": "Novamart Retail", "type": "Retail", "prefix": "NVM"},
+    "titanelec": {"display_name": "TitanElec Manufacturing", "type": "Manufacturing", "prefix": "TIT"},
+    "swiftlog": {"display_name": "SwiftLog Warehouse", "type": "Logistics", "prefix": "SWL"}
+}
 
 # ----------------- Model Architecture -----------------
 class DelayPredictor(nn.Module):
@@ -28,7 +48,6 @@ class DelayPredictor(nn.Module):
         super().__init__()
         if hidden_dims is None:
             hidden_dims = [128, 64, 32]
-        
         layers = []
         prev_dim = input_dim
         for h_dim in hidden_dims:
@@ -39,7 +58,6 @@ class DelayPredictor(nn.Module):
                 nn.Dropout(dropout_rate),
             ])
             prev_dim = h_dim
-            
         layers.append(nn.Linear(prev_dim, 1))
         layers.append(nn.Sigmoid())
         self.network = nn.Sequential(*layers)
@@ -47,172 +65,178 @@ class DelayPredictor(nn.Module):
     def forward(self, x):
         return self.network(x)
 
-# ----------------- Globals & Loading -----------------
+# ----------------- Globals -----------------
 model = None
 label_encoders = {}
-shap_data = {}
 scaler = None
+global_threshold = 0.5
+org_test_data = {}
 
 @app.on_event("startup")
 def load_assets():
-    global model, label_encoders, shap_data
-    print("Loading model and encoders...")
-    
-    # Load Model
+    global model, label_encoders, scaler, global_threshold, org_test_data
+    print("Loading assets for SupplyShield v2...")
+
     model_path = os.path.join(CHECKPOINTS_DIR, "federated_global_best.pt")
-    if not os.path.exists(model_path):
-        raise RuntimeError(f"Model file not found at {model_path}")
-    
-    checkpoint = torch.load(model_path, map_location=torch.device('cpu'))
-    model = DelayPredictor(input_dim=checkpoint['input_dim'], 
-                           hidden_dims=checkpoint['hidden_dims'], 
-                           dropout_rate=checkpoint['dropout_rate'])
+    checkpoint = torch.load(model_path, map_location=torch.device('cpu'), weights_only=True)
+    model = DelayPredictor(
+        input_dim=checkpoint['input_dim'],
+        hidden_dims=checkpoint['hidden_dims'],
+        dropout_rate=checkpoint['dropout_rate']
+    )
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
-    
-    # Load Encoders
+
+    import joblib
     encoders_path = os.path.join(CHECKPOINTS_DIR, "label_encoders.pkl")
     if os.path.exists(encoders_path):
-        import joblib
         label_encoders = joblib.load(encoders_path)
-        
-    # Load Scaler
+
     scaler_path = os.path.join(CHECKPOINTS_DIR, "scaler.pkl")
     if os.path.exists(scaler_path):
-        import joblib
-        global scaler
         scaler = joblib.load(scaler_path)
-            
-    # Load SHAP data
-    shap_path = os.path.join(CHECKPOINTS_DIR, "shap_data.pkl")
-    if os.path.exists(shap_path):
-        import joblib
-        shap_data = joblib.load(shap_path)
-    
+
+    thresh_path = os.path.join(CHECKPOINTS_DIR, "threshold.pkl")
+    if os.path.exists(thresh_path):
+        global_threshold = joblib.load(thresh_path)
+
+    for org in ORG_CONFIG.keys():
+        csv_path = os.path.join(DATA_PARTITIONS_DIR, org, "data.csv")
+        if os.path.exists(csv_path):
+            org_test_data[org] = pd.read_csv(csv_path)
+
     print("Assets loaded successfully.")
 
-# ----------------- API Endpoints -----------------
+# ----------------- Inference -----------------
+def predict_row(row: pd.Series):
+    decoded_features = {}
+    encoded_features = []
 
-class PredictionRequest(BaseModel):
-    package_type: str
-    vehicle_type: str
-    delivery_mode: str
-    region: str
-    weather_condition: str
-    distance_km: float
-    package_weight_kg: float
-    delivery_time_hours: float
-    expected_time_hours: float
-    delivery_rating: float
-    delivery_cost: float
-    
-@app.get("/api/stats")
-def get_stats():
+    feature_cols = ['package_type', 'vehicle_type', 'delivery_mode', 'region',
+                    'weather_condition', 'distance_km', 'package_weight_kg',
+                    'delivery_time_hours', 'expected_time_hours', 'delivery_rating',
+                    'delivery_cost', 'time_diff_hours']
+
+    for col in feature_cols:
+        val = row[col]
+        if col in label_encoders:
+            try:
+                le = label_encoders[col]
+                text_val = le.inverse_transform([int(val)])[0]
+                decoded_features[col] = text_val
+                encoded_features.append(float(val))
+            except:
+                decoded_features[col] = "unknown"
+                encoded_features.append(0.0)
+        else:
+            decoded_features[col] = val
+            encoded_features.append(float(val))
+
+    tensor_features = torch.tensor([encoded_features], dtype=torch.float32)
+    if scaler is not None:
+        features_scaled = scaler.transform(np.array([encoded_features]))
+        tensor_features = torch.tensor(features_scaled, dtype=torch.float32)
+
+    with torch.no_grad():
+        prob = model(tensor_features).item()
+
+    is_delayed = prob > global_threshold
+    risk_level = "High" if prob > (global_threshold + 0.15) else "Medium" if prob > (global_threshold - 0.1) else "Low"
+    shipment_state = {**decoded_features, "delay_probability": prob, "risk_level": risk_level}
+
     return {
-        "status": "active",
-        "model_type": "Federated Global Model (FedAvg)",
-        "metrics": {
-            "f1_score": 0.9909,
-            "auc_roc": 1.0000,
-            "accuracy": 0.99
-        },
-        "supported_features": 12,
-        "processed_organizations": 3
+        "delay_probability": prob,
+        "prediction": "Delayed" if is_delayed else "On-Time",
+        "risk_level": risk_level,
+        "features": decoded_features,
+        "shipment_state": shipment_state
     }
 
-@app.get("/api/shap")
-def get_shap():
-    if not shap_data:
-        return {"error": "SHAP data not available"}
-    
-    # Format SHAP data for charting
-    # Convert numpy arrays to lists
-    feature_names = shap_data.get('feature_names', [])
-    shap_values = shap_data.get('shap_values', [])
-    
-    # Calculate mean absolute SHAP per feature across all samples
-    import numpy as np
-    
-    try:
-        # shap_values could be a list of arrays (if classification) or a single array
-        if isinstance(shap_values, list):
-            # Take the array corresponding to the positive class if binary
-            sv = shap_values[1] if len(shap_values) > 1 else shap_values[0]
-        else:
-            sv = shap_values
-            
-        mean_abs_shap = np.abs(sv).mean(axis=0).tolist()
-        
-        # Create a sorted list of dictionaries for the frontend Recharts
-        importance = [{"name": name, "value": float(val)} for name, val in zip(feature_names, mean_abs_shap)]
-        importance.sort(key=lambda x: x["value"], reverse=True)
-        
-        return {"feature_importance": importance}
-    except Exception as e:
-        return {"error": f"Failed to process SHAP data: {str(e)}"}
 
-@app.post("/api/predict")
-def predict_delay(req: PredictionRequest):
-    global model, label_encoders
-    
-    try:
-        # Engineered feature
-        time_diff_hours = req.delivery_time_hours - req.expected_time_hours
-        
-        # Categorical Encoding
-        def encode(feature_name, value):
-            if feature_name in label_encoders:
-                le = label_encoders[feature_name]
-                if value in le.classes_:
-                    return float(le.transform([value])[0])
-                # Unseen label fallback
-                return 0.0
-            return 0.0
+def get_real_shipments(org_key: str):
+    if org_key not in org_test_data:
+        return []
 
-        pkg_encoded = encode('package_type', req.package_type)
-        veh_encoded = encode('vehicle_type', req.vehicle_type)
-        mode_encoded = encode('delivery_mode', req.delivery_mode)
-        reg_encoded = encode('region', req.region)
-        weather_encoded = encode('weather_condition', req.weather_condition)
-        
-        # Feature Vector exactly matching the 12 features during training
-        features = [
-            pkg_encoded,
-            veh_encoded,
-            mode_encoded,
-            reg_encoded,
-            weather_encoded,
-            req.distance_km,
-            req.package_weight_kg,
-            req.delivery_time_hours,
-            req.expected_time_hours,
-            req.delivery_rating,
-            req.delivery_cost,
-            time_diff_hours
-        ]
-        
-        tensor_features = torch.tensor([features], dtype=torch.float32)
-        
-        if scaler is not None:
-            import numpy as np
-            # Scaler expects 2D array
-            features_scaled = scaler.transform(np.array([features]))
-            tensor_features = torch.tensor(features_scaled, dtype=torch.float32)
-            
-        with torch.no_grad():
-            prob = model(tensor_features).item()
-            
-        is_delayed = prob > 0.5
-        
-        return {
-            "delay_probability": prob,
-            "prediction": "Delayed" if is_delayed else "On-Time",
-            "risk_level": "High" if prob > 0.7 else "Medium" if prob > 0.4 else "Low",
-            "features_used": features
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    df = org_test_data[org_key]
+    df_sample = df.sample(n=30, random_state=42).reset_index()
+    prefix = ORG_CONFIG[org_key]["prefix"]
+
+    shipments = []
+    for idx, row in df_sample.iterrows():
+        real_idx = int(row['index'])
+        pred_res = predict_row(row)
+
+        dest_map = {"north": "Delhi", "south": "Bangalore", "east": "Kolkata", "west": "Mumbai", "central": "Nagpur"}
+        dest = dest_map.get(pred_res["features"]["region"], "Hub")
+        guidance = evaluate_rules(pred_res["shipment_state"])
+
+        shipments.append({
+            "id": f"{prefix}-{real_idx:04d}",
+            "route": f"Supplier to {dest}",
+            "package_type": pred_res["features"]["package_type"].title(),
+            "prediction": {
+                "delay_probability": pred_res["delay_probability"],
+                "prediction": pred_res["prediction"],
+                "risk_level": pred_res["risk_level"]
+            },
+            "features": pred_res["features"],
+            "guidance": {
+                "text": guidance["message"],
+                "rule_fired": guidance["reason"]
+            }
+        })
+
+    risk_order = {"High": 0, "Medium": 1, "Low": 2}
+    shipments.sort(key=lambda x: (risk_order[x["prediction"]["risk_level"]], -x["prediction"]["delay_probability"]))
+    return shipments
+
+
+# ----------------- Public Endpoints -----------------
+@app.get("/api/orgs")
+def get_orgs():
+    return [{"id": k, **v} for k, v in ORG_CONFIG.items()]
+
+
+# ----------------- JWT-Protected Endpoints -----------------
+@app.get("/api/kpis")
+def get_kpis(current_org: dict = Depends(get_current_org)):
+    org_key = current_org.get("org_key", "")
+    if not org_key or org_key not in org_test_data:
+        raise HTTPException(status_code=404, detail="Org data not found")
+
+    shipments = get_real_shipments(org_key)
+    high_risk_count = sum(1 for s in shipments if s["prediction"]["risk_level"] == "High")
+    delayed_shipments = [s for s in shipments if s["prediction"]["risk_level"] in ["High", "Medium"]]
+    total_delay = sum(s["features"]["time_diff_hours"] for s in delayed_shipments if s["features"]["time_diff_hours"] > 0)
+    avg_delay_hours = (total_delay / len(delayed_shipments)) if delayed_shipments else 0
+
+    if avg_delay_hours > 24:
+        delay_str = f"{avg_delay_hours / 24:.1f} days"
+    else:
+        delay_str = f"{avg_delay_hours:.1f} hours"
+
+    return {
+        "high_risk_count": high_risk_count,
+        "avg_delay": delay_str,
+        "units_in_transit": f"{len(shipments) * 450:,}"
+    }
+
+
+@app.get("/api/shipments")
+def get_shipments_api(current_org: dict = Depends(get_current_org)):
+    org_key = current_org.get("org_key", "")
+    return get_real_shipments(org_key)
+
+
+@app.get("/api/shipment/{shipment_id}")
+def get_shipment_api(shipment_id: str, current_org: dict = Depends(get_current_org)):
+    org_key = current_org.get("org_key", "")
+    shipments = get_real_shipments(org_key)
+    for s in shipments:
+        if s["id"] == shipment_id:
+            return s
+    raise HTTPException(status_code=404, detail="Shipment not found")
+
 
 if __name__ == "__main__":
     import uvicorn

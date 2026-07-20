@@ -1,26 +1,44 @@
 @import "tailwindcss";
 
+@theme inline {
+  --background: oklch(0.17 0.015 260);
+  --foreground: oklch(0.97 0.005 260);
+  --card: oklch(0.22 0.018 260);
+  --primary: oklch(0.65 0.19 255);
+  --border: oklch(0.30 0.020 260);
+
+  --risk-high: oklch(0.35 0.12 25);
+  --risk-high-foreground: oklch(0.82 0.16 25);
+  --risk-medium: oklch(0.36 0.10 70);
+  --risk-medium-foreground: oklch(0.83 0.15 75);
+  --risk-low: oklch(0.32 0.09 155);
+  --risk-low-foreground: oklch(0.82 0.16 155);
+
+  --sidebar: oklch(0.19 0.016 260);
+  --sidebar-accent: oklch(0.28 0.03 260);
+
+  --radius: 0.75rem;
+}
+
 @layer base {
   body {
-    @apply bg-slate-900 text-slate-100 antialiased selection:bg-indigo-500 selection:text-white;
+    background-color: var(--background);
+    color: var(--foreground);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
     font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  }
+  ::selection {
+    background-color: var(--primary);
+    color: white;
   }
 }
 
 @layer components {
   .glass-card {
-    @apply bg-slate-800/60 backdrop-blur-md border border-slate-700/50 rounded-xl shadow-xl;
-  }
-  
-  .premium-input {
-    @apply w-full bg-slate-900/50 border border-slate-700 rounded-lg px-4 py-2 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all;
-  }
-
-  .premium-label {
-    @apply block text-xs font-medium text-slate-400 mb-1 uppercase tracking-wider;
-  }
-  
-  .btn-primary {
-    @apply w-full flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold py-3 px-4 rounded-lg shadow-lg hover:shadow-indigo-500/30 transition-all duration-300 transform active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed;
+    background-color: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: 0 20px 25px -5px rgb(0 0 0 / 0.4), 0 8px 10px -6px rgb(0 0 0 / 0.4);
   }
 }
