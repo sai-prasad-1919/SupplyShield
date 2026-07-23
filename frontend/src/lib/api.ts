@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const API_URL = 'http://localhost:8001/api';
+const API_URL = 'http://localhost:8000/api';
 
 // ---------- Auth helpers ----------
 const getToken = (): string | null => localStorage.getItem('supplyshield_jwt');

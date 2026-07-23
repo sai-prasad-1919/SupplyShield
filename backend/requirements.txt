@@ -5,6 +5,7 @@ torch
 shap
 pandas
 scikit-learn
+pymongo
 passlib[bcrypt]
 python-jose[cryptography]
 pymongo
