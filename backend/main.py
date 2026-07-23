@@ -1,48 +1,53 @@
+"""
+SupplyShield — Main API v2
+Data served from per-org PostgreSQL databases (not CSV files).
+Per-org DB connection pools are initialised once at startup.
+"""
 import os
 import torch
 import torch.nn as nn
-import pandas as pd
 import numpy as np
-from fastapi import FastAPI, HTTPException, Query, Depends
+import joblib
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from jose import JWTError, jwt
+from psycopg2 import pool as pg_pool
+from psycopg2.extras import RealDictCursor
 from typing import Optional
 
 from backend.guidance.rules import evaluate_rules
 from backend.auth.routes import router as auth_router, get_current_org
 
-# Ensure we're in the correct root directory
+# --------------- Paths ---------------
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CHECKPOINTS_DIR = os.path.join(ROOT_DIR, "checkpoints")
-DATA_PARTITIONS_DIR = os.path.join(ROOT_DIR, "data", "partitions")
 
 app = FastAPI(title="SupplyShield API v2", version="2.0.0")
 
-# Include auth routes
-app.include_router(auth_router)
-
+# CORS must be registered BEFORE routes
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:5174",
-        "http://127.0.0.1:5174",
-    ],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ----------------- Configuration -----------------
+# Include auth routes
+app.include_router(auth_router)
+
+# --------------- Org Config ---------------
 ORG_CONFIG = {
-    "novamart": {"display_name": "Novamart Retail", "type": "Retail", "prefix": "NVM"},
-    "titanelec": {"display_name": "TitanElec Manufacturing", "type": "Manufacturing", "prefix": "TIT"},
-    "swiftlog": {"display_name": "SwiftLog Warehouse", "type": "Logistics", "prefix": "SWL"}
+    "novamart":  {"display_name": "Novamart Retail",          "type": "Retail",          "prefix": "NVM", "postgres_db": "supplyshield_novamart"},
+    "titanelec": {"display_name": "TitanElec Manufacturing",  "type": "Manufacturing",   "prefix": "TIT", "postgres_db": "supplyshield_titanelec"},
+    "swiftlog":  {"display_name": "SwiftLog Warehouse",       "type": "Logistics",       "prefix": "SWL", "postgres_db": "supplyshield_swiftlog"},
 }
 
-# ----------------- Model Architecture -----------------
+PG_USER     = "postgres"
+PG_PASSWORD = "postgres1919"
+PG_HOST     = "localhost"
+PG_PORT     = 5432
+
+# --------------- Model Architecture ---------------
 class DelayPredictor(nn.Module):
     def __init__(self, input_dim, hidden_dims=None, dropout_rate=0.3):
         super().__init__()
@@ -65,18 +70,22 @@ class DelayPredictor(nn.Module):
     def forward(self, x):
         return self.network(x)
 
-# ----------------- Globals -----------------
+# --------------- Globals ---------------
 model = None
 label_encoders = {}
 scaler = None
 global_threshold = 0.5
-org_test_data = {}
+# One SimpleConnectionPool per org-db, keyed by db name.
+# NOTE: ORDER BY RANDOM() is fine at ~2,800 rows/table; revisit if tables grow > 100k rows.
+_pg_pools: dict[str, pg_pool.SimpleConnectionPool] = {}
+
 
 @app.on_event("startup")
 def load_assets():
-    global model, label_encoders, scaler, global_threshold, org_test_data
+    global model, label_encoders, scaler, global_threshold, _pg_pools
     print("Loading assets for SupplyShield v2...")
 
+    # --- ML model ---
     model_path = os.path.join(CHECKPOINTS_DIR, "federated_global_best.pt")
     checkpoint = torch.load(model_path, map_location=torch.device('cpu'), weights_only=True)
     model = DelayPredictor(
@@ -87,7 +96,6 @@ def load_assets():
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
 
-    import joblib
     encoders_path = os.path.join(CHECKPOINTS_DIR, "label_encoders.pkl")
     if os.path.exists(encoders_path):
         label_encoders = joblib.load(encoders_path)
@@ -100,42 +108,73 @@ def load_assets():
     if os.path.exists(thresh_path):
         global_threshold = joblib.load(thresh_path)
 
-    for org in ORG_CONFIG.keys():
-        csv_path = os.path.join(DATA_PARTITIONS_DIR, org, "data.csv")
-        if os.path.exists(csv_path):
-            org_test_data[org] = pd.read_csv(csv_path)
+    # --- PostgreSQL connection pools (one per org) ---
+    for org_key, cfg in ORG_CONFIG.items():
+        db_name = cfg["postgres_db"]
+        try:
+            _pg_pools[db_name] = pg_pool.SimpleConnectionPool(
+                minconn=1, maxconn=5,
+                dbname=db_name, user=PG_USER, password=PG_PASSWORD,
+                host=PG_HOST, port=PG_PORT,
+            )
+            print(f"  [OK] Pool created for {db_name}")
+        except Exception as e:
+            print(f"  [WARN] Could not connect to {db_name}: {e}")
 
     print("Assets loaded successfully.")
 
-# ----------------- Inference -----------------
-def predict_row(row: pd.Series):
-    decoded_features = {}
+
+@app.on_event("shutdown")
+def close_pools():
+    for p in _pg_pools.values():
+        p.closeall()
+
+
+# --------------- Inference ---------------
+CAT_COLS = ['package_type', 'vehicle_type', 'delivery_mode', 'region', 'weather_condition']
+NUM_COLS = ['distance_km', 'package_weight_kg', 'delivery_time_hours',
+            'expected_time_hours', 'delivery_rating', 'delivery_cost', 'time_diff_hours']
+FEATURE_COLS = CAT_COLS + NUM_COLS
+
+
+def predict_from_pg_row(row: dict) -> dict:
+    """
+    Run inference on a row fetched from PostgreSQL.
+    PostgreSQL stores categorical columns as decoded strings (e.g. 'electronics').
+    We re-encode them to ints via label_encoders before passing to the model.
+    Encoders are fit on the full combined dataset so all orgs share the same classes.
+    """
     encoded_features = []
+    decoded_features = {}
 
-    feature_cols = ['package_type', 'vehicle_type', 'delivery_mode', 'region',
-                    'weather_condition', 'distance_km', 'package_weight_kg',
-                    'delivery_time_hours', 'expected_time_hours', 'delivery_rating',
-                    'delivery_cost', 'time_diff_hours']
-
-    for col in feature_cols:
-        val = row[col]
+    for col in CAT_COLS:
+        raw_val = str(row.get(col, "")).lower().strip()
+        decoded_features[col] = raw_val
         if col in label_encoders:
-            try:
-                le = label_encoders[col]
-                text_val = le.inverse_transform([int(val)])[0]
-                decoded_features[col] = text_val
-                encoded_features.append(float(val))
-            except:
-                decoded_features[col] = "unknown"
+            le = label_encoders[col]
+            if raw_val in le.classes_:
+                encoded_features.append(float(le.transform([raw_val])[0]))
+            else:
+                # Unseen label fallback: use class index 0 (most stable default)
+                print(f"  [WARN] Unseen label '{raw_val}' in column '{col}' — using fallback 0")
                 encoded_features.append(0.0)
         else:
-            decoded_features[col] = val
-            encoded_features.append(float(val))
+            encoded_features.append(0.0)
 
-    tensor_features = torch.tensor([encoded_features], dtype=torch.float32)
+    for col in NUM_COLS:
+        val = row.get(col, 0.0)
+        try:
+            val = float(val)
+        except (TypeError, ValueError):
+            val = 0.0
+        decoded_features[col] = val
+        encoded_features.append(val)
+
     if scaler is not None:
         features_scaled = scaler.transform(np.array([encoded_features]))
         tensor_features = torch.tensor(features_scaled, dtype=torch.float32)
+    else:
+        tensor_features = torch.tensor([encoded_features], dtype=torch.float32)
 
     with torch.no_grad():
         prob = model(tensor_features).item()
@@ -149,95 +188,162 @@ def predict_row(row: pd.Series):
         "prediction": "Delayed" if is_delayed else "On-Time",
         "risk_level": risk_level,
         "features": decoded_features,
-        "shipment_state": shipment_state
+        "shipment_state": shipment_state,
     }
 
 
-def get_real_shipments(org_key: str):
-    if org_key not in org_test_data:
+# --------------- PostgreSQL Data Fetch ---------------
+def get_pg_shipments(org_key: str, postgres_db: str) -> list[dict]:
+    """
+    Fetch 30 random shipment rows from the org's PostgreSQL database,
+    run ML inference on each, and return the enriched shipment list.
+    Returns [] on any DB error (with a console warning) rather than crashing.
+    NOTE: ORDER BY RANDOM() is efficient at current table sizes (~2800 rows).
+    """
+    if postgres_db not in _pg_pools:
+        print(f"  [WARN] No connection pool for db '{postgres_db}'")
         return []
 
-    df = org_test_data[org_key]
-    df_sample = df.sample(n=30, random_state=42).reset_index()
-    prefix = ORG_CONFIG[org_key]["prefix"]
+    pool = _pg_pools[postgres_db]
+    conn = None
+    try:
+        conn = pool.getconn()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # ORDER BY RANDOM() for a fresh sample each call — fine at ~2800 rows
+            cur.execute(
+                """
+                SELECT id, package_type, vehicle_type, delivery_mode, region,
+                       weather_condition, distance_km, package_weight_kg,
+                       delivery_time_hours, expected_time_hours, delivery_rating,
+                       delivery_cost, time_diff_hours
+                FROM shipments
+                ORDER BY RANDOM()
+                LIMIT 30
+                """)
+            rows = cur.fetchall()
+    except Exception as e:
+        print(f"  [ERROR] DB query failed for {postgres_db}: {e}")
+        return []
+    finally:
+        if conn:
+            pool.putconn(conn)
+
+    prefix = ORG_CONFIG.get(org_key, {}).get("prefix", "SHP")
+    dest_map = {"north": "Delhi", "south": "Bangalore", "east": "Kolkata",
+                "west": "Mumbai", "central": "Nagpur"}
 
     shipments = []
-    for idx, row in df_sample.iterrows():
-        real_idx = int(row['index'])
-        pred_res = predict_row(row)
+    for row in rows:
+        row = dict(row)
+        pg_id = row.get("id", 0)
+        try:
+            pred = predict_from_pg_row(row)
+        except Exception as e:
+            print(f"  [WARN] Inference failed for row id={pg_id}: {e}")
+            continue
 
-        dest_map = {"north": "Delhi", "south": "Bangalore", "east": "Kolkata", "west": "Mumbai", "central": "Nagpur"}
-        dest = dest_map.get(pred_res["features"]["region"], "Hub")
-        guidance = evaluate_rules(pred_res["shipment_state"])
+        dest = dest_map.get(pred["features"].get("region", ""), "Hub")
+        guidance = evaluate_rules(pred["shipment_state"])
 
+        pkg = pred["features"].get("package_type", "")
         shipments.append({
-            "id": f"{prefix}-{real_idx:04d}",
+            "id": f"{prefix}-{pg_id:04d}",
             "route": f"Supplier to {dest}",
-            "package_type": pred_res["features"]["package_type"].title(),
+            "package_type": pkg.title(),
             "prediction": {
-                "delay_probability": pred_res["delay_probability"],
-                "prediction": pred_res["prediction"],
-                "risk_level": pred_res["risk_level"]
+                "delay_probability": pred["delay_probability"],
+                "prediction": pred["prediction"],
+                "risk_level": pred["risk_level"],
             },
-            "features": pred_res["features"],
+            "features": pred["features"],
             "guidance": {
                 "text": guidance["message"],
-                "rule_fired": guidance["reason"]
-            }
+                "rule_fired": guidance["reason"],
+            },
         })
 
     risk_order = {"High": 0, "Medium": 1, "Low": 2}
-    shipments.sort(key=lambda x: (risk_order[x["prediction"]["risk_level"]], -x["prediction"]["delay_probability"]))
+    shipments.sort(key=lambda x: (
+        risk_order[x["prediction"]["risk_level"]],
+        -x["prediction"]["delay_probability"]
+    ))
     return shipments
 
 
-# ----------------- Public Endpoints -----------------
+# --------------- Public Endpoints ---------------
 @app.get("/api/orgs")
 def get_orgs():
-    return [{"id": k, **v} for k, v in ORG_CONFIG.items()]
+    return [{"id": k, **{kk: vv for kk, vv in v.items() if kk != "postgres_db"}}
+            for k, v in ORG_CONFIG.items()]
 
 
-# ----------------- JWT-Protected Endpoints -----------------
+# --------------- JWT-Protected Endpoints ---------------
 @app.get("/api/kpis")
 def get_kpis(current_org: dict = Depends(get_current_org)):
-    org_key = current_org.get("org_key", "")
-    if not org_key or org_key not in org_test_data:
-        raise HTTPException(status_code=404, detail="Org data not found")
+    org_key    = current_org.get("org_key", "")
+    postgres_db = current_org.get("postgres_db", "")
 
-    shipments = get_real_shipments(org_key)
-    high_risk_count = sum(1 for s in shipments if s["prediction"]["risk_level"] == "High")
-    delayed_shipments = [s for s in shipments if s["prediction"]["risk_level"] in ["High", "Medium"]]
-    total_delay = sum(s["features"]["time_diff_hours"] for s in delayed_shipments if s["features"]["time_diff_hours"] > 0)
-    avg_delay_hours = (total_delay / len(delayed_shipments)) if delayed_shipments else 0
+    if not org_key or not postgres_db:
+        raise HTTPException(status_code=400, detail="Invalid org token")
 
-    if avg_delay_hours > 24:
-        delay_str = f"{avg_delay_hours / 24:.1f} days"
-    else:
-        delay_str = f"{avg_delay_hours:.1f} hours"
+    try:
+        shipments = get_pg_shipments(org_key, postgres_db)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Database unavailable: {e}")
+
+    if not shipments:
+        raise HTTPException(status_code=503, detail="Could not load shipment data from database")
+
+    high_risk = [s for s in shipments if s["prediction"]["risk_level"] == "High"]
+    delayed   = [s for s in shipments if s["prediction"]["risk_level"] in ("High", "Medium")]
+    total_delay = sum(
+        s["features"].get("time_diff_hours", 0)
+        for s in delayed
+        if (s["features"].get("time_diff_hours") or 0) > 0
+    )
+    avg_delay_hours = (total_delay / len(delayed)) if delayed else 0
+    delay_str = f"{avg_delay_hours / 24:.1f} days" if avg_delay_hours > 24 else f"{avg_delay_hours:.1f} hours"
 
     return {
-        "high_risk_count": high_risk_count,
+        "high_risk_count": len(high_risk),
         "avg_delay": delay_str,
-        "units_in_transit": f"{len(shipments) * 450:,}"
+        "units_in_transit": f"{len(shipments) * 450:,}",
     }
 
 
 @app.get("/api/shipments")
 def get_shipments_api(current_org: dict = Depends(get_current_org)):
-    org_key = current_org.get("org_key", "")
-    return get_real_shipments(org_key)
+    org_key    = current_org.get("org_key", "")
+    postgres_db = current_org.get("postgres_db", "")
+    if not org_key or not postgres_db:
+        raise HTTPException(status_code=400, detail="Invalid org token")
+    try:
+        return get_pg_shipments(org_key, postgres_db)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Database unavailable: {e}")
 
 
 @app.get("/api/shipment/{shipment_id}")
 def get_shipment_api(shipment_id: str, current_org: dict = Depends(get_current_org)):
-    org_key = current_org.get("org_key", "")
-    shipments = get_real_shipments(org_key)
+    """
+    Single-shipment lookup.  Also goes through get_pg_shipments + predict_from_pg_row
+    so the encode/decode fix is automatically applied here too.
+    """
+    org_key    = current_org.get("org_key", "")
+    postgres_db = current_org.get("postgres_db", "")
+    if not org_key or not postgres_db:
+        raise HTTPException(status_code=400, detail="Invalid org token")
+    try:
+        shipments = get_pg_shipments(org_key, postgres_db)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Database unavailable: {e}")
+
     for s in shipments:
         if s["id"] == shipment_id:
             return s
-    raise HTTPException(status_code=404, detail="Shipment not found")
+    raise HTTPException(status_code=404, detail=f"Shipment '{shipment_id}' not found")
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8001, reload=True)
