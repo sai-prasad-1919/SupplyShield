@@ -326,22 +326,80 @@ def get_shipments_api(current_org: dict = Depends(get_current_org)):
 @app.get("/api/shipment/{shipment_id}")
 def get_shipment_api(shipment_id: str, current_org: dict = Depends(get_current_org)):
     """
-    Single-shipment lookup.  Also goes through get_pg_shipments + predict_from_pg_row
-    so the encode/decode fix is automatically applied here too.
+    Single-shipment lookup — queries PostgreSQL directly by row ID.
+    The shipment_id format is '{PREFIX}-{row_id:04d}' e.g. 'NVM-0198' → id=198.
+    This avoids the 404 bug that occurred when ORDER BY RANDOM() returned a
+    different set of rows than the previous /api/shipments call.
     """
-    org_key    = current_org.get("org_key", "")
+    org_key     = current_org.get("org_key", "")
     postgres_db = current_org.get("postgres_db", "")
     if not org_key or not postgres_db:
         raise HTTPException(status_code=400, detail="Invalid org token")
+
+    # Parse the numeric row ID from the shipment_id string (e.g. "NVM-0198" → 198)
     try:
-        shipments = get_pg_shipments(org_key, postgres_db)
+        row_id = int(shipment_id.split("-")[-1])
+    except (ValueError, IndexError):
+        raise HTTPException(status_code=400, detail=f"Invalid shipment ID format: '{shipment_id}'")
+
+    if postgres_db not in _pg_pools:
+        raise HTTPException(status_code=503, detail="Database connection unavailable")
+
+    pool = _pg_pools[postgres_db]
+    conn = None
+    try:
+        conn = pool.getconn()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, package_type, vehicle_type, delivery_mode, region,
+                       weather_condition, distance_km, package_weight_kg,
+                       delivery_time_hours, expected_time_hours, delivery_rating,
+                       delivery_cost, time_diff_hours
+                FROM shipments
+                WHERE id = %s
+                """,
+                (row_id,)
+            )
+            row = cur.fetchone()
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Database unavailable: {e}")
+    finally:
+        if conn:
+            pool.putconn(conn)
 
-    for s in shipments:
-        if s["id"] == shipment_id:
-            return s
-    raise HTTPException(status_code=404, detail=f"Shipment '{shipment_id}' not found")
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Shipment '{shipment_id}' not found in database")
+
+    row = dict(row)
+    try:
+        pred = predict_from_pg_row(row)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Inference failed: {e}")
+
+    dest_map = {"north": "Delhi", "south": "Bangalore", "east": "Kolkata",
+                "west": "Mumbai", "central": "Nagpur"}
+    dest     = dest_map.get(pred["features"].get("region", ""), "Hub")
+    guidance = evaluate_rules(pred["shipment_state"])
+    prefix   = ORG_CONFIG.get(org_key, {}).get("prefix", "SHP")
+    pkg      = pred["features"].get("package_type", "")
+
+    return {
+        "id": f"{prefix}-{row_id:04d}",
+        "route": f"Supplier to {dest}",
+        "package_type": pkg.title(),
+        "prediction": {
+            "delay_probability": pred["delay_probability"],
+            "prediction":        pred["prediction"],
+            "risk_level":        pred["risk_level"],
+        },
+        "features": pred["features"],
+        "guidance": {
+            "text":       guidance["message"],
+            "rule_fired": guidance["reason"],
+        },
+    }
+
 
 
 if __name__ == "__main__":
