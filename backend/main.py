@@ -402,6 +402,263 @@ def get_shipment_api(shipment_id: str, current_org: dict = Depends(get_current_o
 
 
 
+# --------------- Supplier Intelligence Endpoints ---------------
+
+def _get_pool(postgres_db: str):
+    """Return a connection from the org pool, or raise 503."""
+    if postgres_db not in _pg_pools:
+        raise HTTPException(status_code=503, detail="Database connection unavailable")
+    return _pg_pools[postgres_db]
+
+
+def _compute_supplier_metrics(cur, supplier_id: int) -> dict:
+    """
+    Compute analytical metrics for a supplier from their linked shipments.
+    Returns a dict with aggregated statistics.
+    """
+    cur.execute("""
+        SELECT
+            COUNT(*)                                        AS shipment_count,
+            AVG(delivery_rating)                            AS avg_delivery_rating,
+            AVG(delivery_cost)                              AS avg_delivery_cost,
+            AVG(delivery_time_hours)                        AS avg_delivery_time_hours,
+            AVG(CASE WHEN time_diff_hours > 0
+                     THEN time_diff_hours ELSE 0 END)       AS avg_delay_hours
+        FROM shipments
+        WHERE supplier_id = %s
+    """, (supplier_id,))
+    row = cur.fetchone()
+    shipment_count        = int(row[0] or 0)
+    avg_rating            = float(row[1] or 0.0)
+    avg_cost              = float(row[2] or 0.0)
+    avg_delivery_hrs      = float(row[3] or 0.0)
+    avg_delay_hrs         = float(row[4] or 0.0)
+
+    # On-time = delivery_time_hours <= expected_time_hours
+    cur.execute("""
+        SELECT
+            COUNT(*) FILTER (WHERE delivery_time_hours <= expected_time_hours) AS on_time,
+            COUNT(*) FILTER (WHERE delivery_time_hours >  expected_time_hours) AS delayed
+        FROM shipments
+        WHERE supplier_id = %s
+    """, (supplier_id,))
+    ot_row       = cur.fetchone()
+    on_time      = int(ot_row[0] or 0)
+    delayed      = int(ot_row[1] or 0)
+    on_time_rate = round(on_time / shipment_count, 4) if shipment_count > 0 else 0.0
+    delay_pct    = round(delayed / shipment_count, 4) if shipment_count > 0 else 0.0
+
+    return {
+        "shipment_count":        shipment_count,
+        "on_time_count":         on_time,
+        "delayed_count":         delayed,
+        "on_time_rate":          on_time_rate,
+        "delay_percentage":      delay_pct,
+        "avg_delivery_rating":   round(avg_rating, 2),
+        "avg_delivery_cost":     round(avg_cost, 2),
+        "avg_delivery_time_hrs": round(avg_delivery_hrs, 2),
+        "avg_delay_hours":       round(avg_delay_hrs, 2),
+    }
+
+
+def _risk_level_from_delay(delay_pct: float) -> str:
+    if delay_pct >= 0.55:
+        return "High"
+    elif delay_pct >= 0.30:
+        return "Medium"
+    return "Low"
+
+
+@app.get("/api/suppliers/kpis")
+def get_supplier_kpis(current_org: dict = Depends(get_current_org)):
+    """KPI summary strip: total suppliers, high-risk count, avg on-time rate."""
+    org_key     = current_org.get("org_key", "")
+    postgres_db = current_org.get("postgres_db", "")
+    if not org_key or not postgres_db:
+        raise HTTPException(status_code=400, detail="Invalid org token")
+
+    pool = _get_pool(postgres_db)
+    conn = None
+    try:
+        conn = pool.getconn()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT COUNT(*) AS total FROM suppliers WHERE active = TRUE")
+            total = int(cur.fetchone()["total"])
+
+            cur.execute("SELECT id FROM suppliers WHERE active = TRUE")
+            sup_ids = [r["id"] for r in cur.fetchall()]
+
+        high_risk = 0
+        total_on_time_rate = 0.0
+        for sid in sup_ids:
+            with conn.cursor() as cur:
+                metrics = _compute_supplier_metrics(cur, sid)
+            if _risk_level_from_delay(metrics["delay_percentage"]) == "High":
+                high_risk += 1
+            total_on_time_rate += metrics["on_time_rate"]
+
+        avg_on_time = round(total_on_time_rate / total, 2) if total > 0 else 0.0
+    finally:
+        if conn:
+            pool.putconn(conn)
+
+    return {
+        "total_suppliers":   total,
+        "high_risk_count":   high_risk,
+        "avg_on_time_rate":  avg_on_time,
+    }
+
+
+@app.get("/api/suppliers")
+def get_suppliers(current_org: dict = Depends(get_current_org)):
+    """
+    Returns all active suppliers for the logged-in org with computed risk metrics.
+    """
+    org_key     = current_org.get("org_key", "")
+    postgres_db = current_org.get("postgres_db", "")
+    if not org_key or not postgres_db:
+        raise HTTPException(status_code=400, detail="Invalid org token")
+
+    pool = _get_pool(postgres_db)
+    conn = None
+    try:
+        conn = pool.getconn()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT id, name, contact_name, contact_email, contact_phone,
+                       region, category, lead_time_days, active, joined_at
+                FROM suppliers
+                WHERE active = TRUE
+                ORDER BY name
+            """)
+            rows = [dict(r) for r in cur.fetchall()]
+
+        result = []
+        for row in rows:
+            with conn.cursor() as cur:
+                metrics = _compute_supplier_metrics(cur, row["id"])
+            result.append({
+                "id":              row["id"],
+                "name":            row["name"],
+                "category":        row["category"],
+                "region":          row["region"],
+                "lead_time_days":  row["lead_time_days"],
+                "contact_name":    row["contact_name"],
+                "contact_email":   row["contact_email"],
+                "contact_phone":   row["contact_phone"],
+                "active":          row["active"],
+                "joined_at":       row["joined_at"].isoformat() if row.get("joined_at") else None,
+                "metrics":         metrics,
+                "risk_level":      _risk_level_from_delay(metrics["delay_percentage"]),
+            })
+    finally:
+        if conn:
+            pool.putconn(conn)
+
+    return {"suppliers": result, "total": len(result)}
+
+
+@app.get("/api/supplier/{supplier_id}")
+def get_supplier(supplier_id: int, current_org: dict = Depends(get_current_org)):
+    """Full supplier profile with computed performance metrics."""
+    org_key     = current_org.get("org_key", "")
+    postgres_db = current_org.get("postgres_db", "")
+    if not org_key or not postgres_db:
+        raise HTTPException(status_code=400, detail="Invalid org token")
+
+    pool = _get_pool(postgres_db)
+    conn = None
+    try:
+        conn = pool.getconn()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT id, name, contact_name, contact_email, contact_phone,
+                       region, category, lead_time_days, active, joined_at
+                FROM suppliers WHERE id = %s
+            """, (supplier_id,))
+            row = cur.fetchone()
+
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Supplier {supplier_id} not found")
+
+        row = dict(row)
+        with conn.cursor() as cur:
+            metrics = _compute_supplier_metrics(cur, supplier_id)
+
+    finally:
+        if conn:
+            pool.putconn(conn)
+
+    return {
+        "id":             row["id"],
+        "name":           row["name"],
+        "category":       row["category"],
+        "region":         row["region"],
+        "lead_time_days": row["lead_time_days"],
+        "contact_name":   row["contact_name"],
+        "contact_email":  row["contact_email"],
+        "contact_phone":  row["contact_phone"],
+        "active":         row["active"],
+        "joined_at":      row["joined_at"].isoformat() if row.get("joined_at") else None,
+        "metrics":        metrics,
+        "risk_level":     _risk_level_from_delay(metrics["delay_percentage"]),
+    }
+
+
+@app.get("/api/supplier/{supplier_id}/shipments")
+def get_supplier_shipments(supplier_id: int, current_org: dict = Depends(get_current_org)):
+    """Returns the last 20 shipments linked to this supplier, with predictions."""
+    org_key     = current_org.get("org_key", "")
+    postgres_db = current_org.get("postgres_db", "")
+    if not org_key or not postgres_db:
+        raise HTTPException(status_code=400, detail="Invalid org token")
+
+    pool   = _get_pool(postgres_db)
+    prefix = ORG_CONFIG.get(org_key, {}).get("prefix", "SHP")
+    dest_map = {"north": "Delhi", "south": "Bangalore", "east": "Kolkata",
+                "west": "Mumbai", "central": "Nagpur"}
+    conn = None
+    try:
+        conn = pool.getconn()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT id, package_type, vehicle_type, delivery_mode, region,
+                       weather_condition, distance_km, package_weight_kg,
+                       delivery_time_hours, expected_time_hours, delivery_rating,
+                       delivery_cost, time_diff_hours
+                FROM shipments
+                WHERE supplier_id = %s
+                ORDER BY id DESC
+                LIMIT 20
+            """, (supplier_id,))
+            rows = [dict(r) for r in cur.fetchall()]
+    finally:
+        if conn:
+            pool.putconn(conn)
+
+    shipments = []
+    for row in rows:
+        pg_id = row.get("id", 0)
+        try:
+            pred = predict_from_pg_row(row)
+        except Exception:
+            continue
+        dest = dest_map.get(pred["features"].get("region", ""), "Hub")
+        guidance = evaluate_rules(pred["shipment_state"])
+        shipments.append({
+            "id":           f"{prefix}-{pg_id:04d}",
+            "route":        f"Supplier to {dest}",
+            "package_type": pred["features"].get("package_type", "").title(),
+            "prediction": {
+                "delay_probability": pred["delay_probability"],
+                "risk_level":        pred["risk_level"],
+            },
+            "guidance": {"text": guidance["message"]},
+        })
+
+    return {"shipments": shipments, "total": len(shipments)}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8001, reload=True)
