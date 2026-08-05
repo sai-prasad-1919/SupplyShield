@@ -61,3 +61,24 @@ export const clearSession = () => {
 };
 
 export const isAuthenticated = (): boolean => !!getToken();
+
+// ---------- Supplier Intelligence endpoints ----------
+export const fetchSupplierKpis = async () => {
+  const res = await axios.get(`${API_URL}/suppliers/kpis`, { headers: authHeader() });
+  return res.data;
+};
+
+export const fetchSuppliers = async () => {
+  const res = await axios.get(`${API_URL}/suppliers`, { headers: authHeader() });
+  return res.data; // { suppliers: [...], total: N }
+};
+
+export const fetchSupplier = async (id: number | string) => {
+  const res = await axios.get(`${API_URL}/supplier/${id}`, { headers: authHeader() });
+  return res.data;
+};
+
+export const fetchSupplierShipments = async (id: number | string) => {
+  const res = await axios.get(`${API_URL}/supplier/${id}/shipments`, { headers: authHeader() });
+  return res.data; // { shipments: [...], total: N }
+};
