@@ -18,6 +18,7 @@ import { Route as AuthenticatedDemandRouteImport } from './routes/_authenticated
 import { Route as AuthenticatedGuidanceRouteImport } from './routes/_authenticated/guidance'
 import { Route as AuthenticatedSuppliersRouteImport } from './routes/_authenticated/suppliers'
 import { Route as AuthenticatedShipmentsIdRouteImport } from './routes/_authenticated/shipments.$id'
+import { Route as AuthenticatedSuppliersIdRouteImport } from './routes/_authenticated/suppliers.$id'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -64,6 +65,12 @@ const AuthenticatedShipmentsIdRoute =
     path: '/shipments/$id',
     getParentRoute: () => AuthenticatedRoute,
   } as any)
+const AuthenticatedSuppliersIdRoute =
+  AuthenticatedSuppliersIdRouteImport.update({
+    id: '/$id',
+    path: '/$id',
+    getParentRoute: () => AuthenticatedSuppliersRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -72,8 +79,9 @@ export interface FileRoutesByFullPath {
   '/dashboard': typeof AuthenticatedDashboardRoute
   '/demand': typeof AuthenticatedDemandRoute
   '/guidance': typeof AuthenticatedGuidanceRoute
-  '/suppliers': typeof AuthenticatedSuppliersRoute
+  '/suppliers': typeof AuthenticatedSuppliersRouteWithChildren
   '/shipments/$id': typeof AuthenticatedShipmentsIdRoute
+  '/suppliers/$id': typeof AuthenticatedSuppliersIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -82,8 +90,9 @@ export interface FileRoutesByTo {
   '/dashboard': typeof AuthenticatedDashboardRoute
   '/demand': typeof AuthenticatedDemandRoute
   '/guidance': typeof AuthenticatedGuidanceRoute
-  '/suppliers': typeof AuthenticatedSuppliersRoute
+  '/suppliers': typeof AuthenticatedSuppliersRouteWithChildren
   '/shipments/$id': typeof AuthenticatedShipmentsIdRoute
+  '/suppliers/$id': typeof AuthenticatedSuppliersIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -94,8 +103,9 @@ export interface FileRoutesById {
   '/_authenticated/dashboard': typeof AuthenticatedDashboardRoute
   '/_authenticated/demand': typeof AuthenticatedDemandRoute
   '/_authenticated/guidance': typeof AuthenticatedGuidanceRoute
-  '/_authenticated/suppliers': typeof AuthenticatedSuppliersRoute
+  '/_authenticated/suppliers': typeof AuthenticatedSuppliersRouteWithChildren
   '/_authenticated/shipments/$id': typeof AuthenticatedShipmentsIdRoute
+  '/_authenticated/suppliers/$id': typeof AuthenticatedSuppliersIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -108,6 +118,7 @@ export interface FileRouteTypes {
     | '/guidance'
     | '/suppliers'
     | '/shipments/$id'
+    | '/suppliers/$id'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -118,6 +129,7 @@ export interface FileRouteTypes {
     | '/guidance'
     | '/suppliers'
     | '/shipments/$id'
+    | '/suppliers/$id'
   id:
     | '__root__'
     | '/'
@@ -129,6 +141,7 @@ export interface FileRouteTypes {
     | '/_authenticated/guidance'
     | '/_authenticated/suppliers'
     | '/_authenticated/shipments/$id'
+    | '/_authenticated/suppliers/$id'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -203,14 +216,35 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedShipmentsIdRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
+    '/_authenticated/suppliers/$id': {
+      id: '/_authenticated/suppliers/$id'
+      path: '/$id'
+      fullPath: '/suppliers/$id'
+      preLoaderRoute: typeof AuthenticatedSuppliersIdRouteImport
+      parentRoute: typeof AuthenticatedSuppliersRoute
+    }
   }
 }
+
+interface AuthenticatedSuppliersRouteChildren {
+  AuthenticatedSuppliersIdRoute: typeof AuthenticatedSuppliersIdRoute
+}
+
+const AuthenticatedSuppliersRouteChildren: AuthenticatedSuppliersRouteChildren =
+  {
+    AuthenticatedSuppliersIdRoute: AuthenticatedSuppliersIdRoute,
+  }
+
+const AuthenticatedSuppliersRouteWithChildren =
+  AuthenticatedSuppliersRoute._addFileChildren(
+    AuthenticatedSuppliersRouteChildren,
+  )
 
 interface AuthenticatedRouteChildren {
   AuthenticatedDashboardRoute: typeof AuthenticatedDashboardRoute
   AuthenticatedDemandRoute: typeof AuthenticatedDemandRoute
   AuthenticatedGuidanceRoute: typeof AuthenticatedGuidanceRoute
-  AuthenticatedSuppliersRoute: typeof AuthenticatedSuppliersRoute
+  AuthenticatedSuppliersRoute: typeof AuthenticatedSuppliersRouteWithChildren
   AuthenticatedShipmentsIdRoute: typeof AuthenticatedShipmentsIdRoute
 }
 
@@ -218,7 +252,7 @@ const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
   AuthenticatedDashboardRoute: AuthenticatedDashboardRoute,
   AuthenticatedDemandRoute: AuthenticatedDemandRoute,
   AuthenticatedGuidanceRoute: AuthenticatedGuidanceRoute,
-  AuthenticatedSuppliersRoute: AuthenticatedSuppliersRoute,
+  AuthenticatedSuppliersRoute: AuthenticatedSuppliersRouteWithChildren,
   AuthenticatedShipmentsIdRoute: AuthenticatedShipmentsIdRoute,
 }
 
