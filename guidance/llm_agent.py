@@ -57,14 +57,39 @@ class LLMGuide:
 
     def _call_llm(self, explanation: dict) -> list[str]:
         """Format the explanation and call Gemini to get a mitigation plan."""
+        
+        prediction = explanation.get('prediction', {})
+        explainability = explanation.get('explainability', {})
+        context = explanation.get('context', {})
+        business_rules = explanation.get('business_rules', [])
+        
+        # Build context string
+        context_str = "  " + " | ".join([f"{k}: {v}" for k, v in context.items()]) if context else "  None provided"
+        
+        # Build rules string
+        rules_str = "\n  ".join([f"- {r}" for r in business_rules]) if business_rules else "  None triggered"
+        
+        # Build SHAP drivers string
+        drivers_str = ""
+        for i, d in enumerate(explainability.get('top_drivers', []), 1):
+            drivers_str += f"  {i}. {d['feature']} = {d['value']}  -> impact: {d['impact']:+.2f} ({d['direction']})\n"
+            
         prompt = f"""
-        You are SupplyShield, an AI logistics expert.
-        A shipment has a high risk of delay ({explanation['prediction'].get('delay_probability', 0)*100:.1f}%).
+        You are SupplyShield, an AI logistics risk analyst.
         
-        The SHAP explainability model identified the following top drivers for the delay:
-        {json.dumps(explanation['explainability'].get('top_drivers', []), indent=2)}
-        
-        Please provide 3 specific, actionable mitigation strategies for the supply chain manager.
+        SHIPMENT CONTEXT:
+        {context_str}
+
+        PREDICTION:
+          Delay Probability: {prediction.get('delay_probability', 0)*100:.1f}%  ->  HIGH RISK
+
+        TOP SHAP DRIVERS (why the model flagged this shipment):
+        {drivers_str}
+        BUSINESS RULES TRIGGERED:
+        {rules_str}
+
+        Generate 3 specific, actionable mitigation strategies for the supply chain manager.
+        DO NOT invent model results. The above figures come from the ML model output directly.
         Format your response as a JSON array of 3 strings. Example: ["Mitigation 1", "Mitigation 2", "Mitigation 3"]
         """
         

@@ -13,6 +13,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from psycopg2 import pool as pg_pool
 from psycopg2.extras import RealDictCursor
 from typing import Optional
+from pydantic import BaseModel
+import passlib.hash as phash
+from models.delay_predictor import create_model
+from models.xgboost_model import XGBoostPredictor
+from explainability.shap_explainer import XGBoostExplainer, generate_explanation_dict
+from guidance.llm_agent import get_guidance
 
 from backend.guidance.rules import evaluate_rules
 from backend.auth.routes import router as auth_router, get_current_org
@@ -668,6 +674,92 @@ def get_supplier_shipments(supplier_id: int, current_org: dict = Depends(get_cur
         })
 
     return {"shipments": shipments, "total": len(shipments)}
+
+class ExplainRequest(BaseModel):
+    features: dict
+
+@app.post("/api/predict/explain")
+def predict_explain(req: ExplainRequest, current_org: dict = Depends(get_current_org)):
+    """Runs FL model, XGBoost, SHAP, and LLM guidance for a single shipment."""
+    row = req.features
+    
+    # Run existing FL prediction logic
+    fl_pred = predict_from_pg_row(row)
+    fl_prob = fl_pred["delay_probability"]
+    
+    encoded_features = []
+    # Re-encode features exactly as done in predict_from_pg_row to pass to XGBoost
+    for col in CAT_COLS:
+        raw_val = str(row.get(col, "")).lower().strip()
+        if col in label_encoders:
+            le = label_encoders[col]
+            if raw_val in le.classes_:
+                encoded_features.append(float(le.transform([raw_val])[0]))
+            else:
+                encoded_features.append(0.0)
+        else:
+            encoded_features.append(0.0)
+            
+    for col in NUM_COLS:
+        try:
+            encoded_features.append(float(row.get(col, 0.0)))
+        except:
+            encoded_features.append(0.0)
+            
+    # Apply scaler
+    features_scaled = scaler.transform(np.array([encoded_features]))
+    
+    xgb_prob = 0.0
+    top_drivers = []
+    recommendations = []
+    shap_base_value = 0.5
+    
+    if hasattr(app.state, 'xgb_model') and app.state.xgb_model is not None:
+        xgb_prob = float(app.state.xgb_model.predict_proba(features_scaled)[0, 1])
+        
+    if hasattr(app.state, 'xgb_explainer') and app.state.xgb_explainer is not None:
+        shap_values = app.state.xgb_explainer.explain_instances(features_scaled)
+        if len(shap_values.shape) > 1:
+            shap_values = shap_values[0]
+            
+        shap_base_value = getattr(app.state, 'xgb_base_value', 0.5)
+        
+        # We need to get feature_names from somewhere. Since XGBoost Explainer might not have them natively in app.state
+        # let's use the explicit feature names if available, else build from CAT_COLS and NUM_COLS
+        feature_names = getattr(app.state, 'feature_names', CAT_COLS + NUM_COLS)
+        
+        # For the raw values sent to LLM, ensure we match the feature names order
+        raw_values = [row.get(col, "") for col in CAT_COLS] + [row.get(col, 0.0) for col in NUM_COLS]
+        
+        explanation_dict = generate_explanation_dict(
+            feature_names=feature_names,
+            feature_values=raw_values,
+            shap_values=shap_values,
+            base_value=shap_base_value,
+            prediction_prob=xgb_prob
+        )
+        
+        # Add context and rules to explanation dict for LLM
+        explanation_dict["context"] = fl_pred["features"]
+        
+        # Trigger basic business rules from FL model
+        rule_res = evaluate_rules(fl_pred["shipment_state"])
+        explanation_dict["business_rules"] = [rule_res["message"]] if rule_res["flag"] != "green" else []
+        
+        top_drivers = explanation_dict["explainability"]["top_drivers"]
+        
+        # Call LLM
+        recommendations = get_guidance(explanation_dict)
+    
+    return {
+        "fl_probability": fl_prob,
+        "xgb_probability": xgb_prob,
+        "risk_level": fl_pred["risk_level"],
+        "threshold": global_threshold,
+        "top_drivers": top_drivers,
+        "recommendations": recommendations,
+        "shap_base_value": shap_base_value
+    }
 
 
 if __name__ == "__main__":

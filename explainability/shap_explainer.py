@@ -164,3 +164,16 @@ def generate_explanation_dict(
             "all_contributions": contributions
         }
     }
+
+class XGBoostExplainer:
+    """Wrapper for SHAP explainability on XGBoost model."""
+    def __init__(self, model, feature_names: list[str]):
+        # model is the xgb.XGBClassifier
+        self.explainer = shap.TreeExplainer(model)
+        self.feature_names = feature_names
+        
+    def explain_instances(self, instances: np.ndarray) -> np.ndarray:
+        # returns log-odds contributions
+        shap_values = self.explainer.shap_values(instances)
+        return shap_values
+

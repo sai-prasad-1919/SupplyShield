@@ -37,15 +37,16 @@ def generate_rule_based_guidance(explanation: dict) -> list[str]:
         
         # We only care about features that *increase* delay
         if impact > 0:
-            if feature == "weather":
-                # Assuming high values (e.g., 2, 3) indicate bad weather based on our encoding
-                recommendations.append("Mitigation: Severe weather detected. Re-route or switch to weather-resistant transport.")
-            elif feature == "traffic":
-                recommendations.append("Mitigation: Heavy traffic expected. Delay departure by 2 hours or use alternate highways.")
+            if feature == "weather_condition":
+                recommendations.append("Mitigation: Severe weather conditions detected. Consider re-routing or switching to weather-resistant transport modes.")
             elif feature == "vehicle_type":
-                recommendations.append("Mitigation: Current vehicle type correlates with delays for this route. Consider upgrading to a larger or more reliable vehicle.")
+                recommendations.append("Mitigation: Vehicle type correlates with delays for this route. Consider upgrading to a faster or more reliable vehicle.")
             elif feature == "distance_km":
-                recommendations.append("Mitigation: Distance is a significant factor. Consider split shipments or cross-docking midway.")
+                recommendations.append("Mitigation: Distance is a significant factor. Consider cross-docking or expedited staging at intermediate hubs.")
+            elif feature == "delivery_mode":
+                recommendations.append("Mitigation: The current delivery mode (e.g. Standard) is high-risk here. Upgrade to express shipping.")
+            elif feature == "region":
+                recommendations.append("Mitigation: Destination region is experiencing logistical delays. Check local congestion alerts.")
                 
     if not recommendations[1:]:
         recommendations.append("Review standard delay protocols with the delivery partner.")
