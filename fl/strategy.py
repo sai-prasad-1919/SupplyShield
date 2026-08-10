@@ -59,7 +59,7 @@ class SaveModelStrategy(fl.server.strategy.FedAvg):
         
         agg_metrics = {}
         # Keys to aggregate
-        keys = ["accuracy", "f1", "auc", "test_acc", "test_f1", "test_auc"]
+        keys = ["accuracy", "precision", "recall", "f1", "auc", "test_acc", "test_precision", "test_recall", "test_f1", "test_auc"]
         
         for key in keys:
             weighted_sum = sum([res.metrics.get(key, 0.0) * res.num_examples for _, res in results])
@@ -78,9 +78,28 @@ class SaveModelStrategy(fl.server.strategy.FedAvg):
         }
         self.history["rounds"].append(round_data)
         
-        # Save history to disk
+        # Save history to disk (models/saved/ - legacy format)
         with open(MODEL_DIR / "fl_history.json", "w") as f:
             json.dump(self.history, f, indent=4)
+            
+        # Transform history into the format required by dashboard and save in checkpoints/
+        dashboard_history = {
+            "loss": [],
+            "accuracy": [],
+            "precision": [],
+            "recall": [],
+            "f1": [],
+            "auc": []
+        }
+        for rd in self.history["rounds"]:
+            rnd = rd["round"]
+            dashboard_history["loss"].append({"round": rnd, "value": rd["loss"]})
+            for k in ["accuracy", "precision", "recall", "f1", "auc"]:
+                dashboard_history[k].append({"round": rnd, "value": rd.get(k, 0.0)})
+                
+        from config import CHECKPOINTS_DIR
+        with open(CHECKPOINTS_DIR / "fl_history.json", "w") as f:
+            json.dump(dashboard_history, f, indent=4)
             
         return loss_aggregated, agg_metrics
 

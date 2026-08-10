@@ -1,0 +1,134 @@
+{
+    "version": "v1",
+    "features": [
+        "package_type",
+        "vehicle_type",
+        "delivery_mode",
+        "region",
+        "weather_condition",
+        "distance_km",
+        "package_weight_kg",
+        "expected_time_hours",
+        "delivery_cost"
+    ],
+    "random_seed": 42,
+    "fl_rounds": 10,
+    "fl_aggregation": "FedAvg",
+    "fl_clients": [
+        "novamart",
+        "titanelec",
+        "swiftlog"
+    ],
+    "decision_threshold": 0.2860368490219116,
+    "data_splits": {
+        "novamart": {
+            "test_samples": 566,
+            "delay_rate": 0.2826855123674912
+        },
+        "titanelec": {
+            "test_samples": 564,
+            "delay_rate": 0.25177304964539005
+        },
+        "swiftlog": {
+            "test_samples": 561,
+            "delay_rate": 0.2638146167557932
+        }
+    },
+    "final_test_metrics": {
+        "centralized": {
+            "accuracy": 0.8871,
+            "f1": 0.8011,
+            "precision": 0.7539,
+            "recall": 0.8546,
+            "specificity": 0.8989,
+            "auc_roc": 0.9567,
+            "avg_precision": 0.8779,
+            "confusion_matrix": [
+                [
+                    836,
+                    94
+                ],
+                [
+                    49,
+                    288
+                ]
+            ]
+        },
+        "novamart": {
+            "accuracy": 0.884,
+            "f1": 0.8142,
+            "precision": 0.7093,
+            "recall": 0.9555,
+            "specificity": 0.8581,
+            "auc_roc": 0.9499,
+            "avg_precision": 0.8511,
+            "confusion_matrix": [
+                [
+                    798,
+                    132
+                ],
+                [
+                    15,
+                    322
+                ]
+            ]
+        },
+        "titanelec": {
+            "accuracy": 0.8808,
+            "f1": 0.7946,
+            "precision": 0.7337,
+            "recall": 0.8665,
+            "specificity": 0.886,
+            "auc_roc": 0.9498,
+            "avg_precision": 0.8499,
+            "confusion_matrix": [
+                [
+                    824,
+                    106
+                ],
+                [
+                    45,
+                    292
+                ]
+            ]
+        },
+        "swiftlog": {
+            "accuracy": 0.8816,
+            "f1": 0.7899,
+            "precision": 0.748,
+            "recall": 0.8368,
+            "specificity": 0.8978,
+            "auc_roc": 0.9554,
+            "avg_precision": 0.8753,
+            "confusion_matrix": [
+                [
+                    835,
+                    95
+                ],
+                [
+                    55,
+                    282
+                ]
+            ]
+        },
+        "federated": {
+            "accuracy": 0.8824,
+            "f1": 0.8149,
+            "precision": 0.7009,
+            "recall": 0.9733,
+            "specificity": 0.8495,
+            "auc_roc": 0.9554,
+            "avg_precision": 0.8743,
+            "confusion_matrix": [
+                [
+                    790,
+                    140
+                ],
+                [
+                    9,
+                    328
+                ]
+            ]
+        }
+    }
+}

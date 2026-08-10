@@ -26,8 +26,8 @@ app = FastAPI(title="SupplyShield API v2", version="2.0.0")
 # CORS must be registered BEFORE routes
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -85,13 +85,14 @@ def load_assets():
     global model, label_encoders, scaler, global_threshold, _pg_pools
     print("Loading assets for SupplyShield v2...")
 
-    # --- ML model ---
+    # --- ML model (FL architecture: hidden_dim=64, no BatchNorm, outputs logits) ---
     model_path = os.path.join(CHECKPOINTS_DIR, "federated_global_best.pt")
     checkpoint = torch.load(model_path, map_location=torch.device('cpu'), weights_only=True)
-    model = DelayPredictor(
+    from models.delay_predictor import DelayPredictor as FLDelayPredictor
+    model = FLDelayPredictor(
         input_dim=checkpoint['input_dim'],
-        hidden_dims=checkpoint['hidden_dims'],
-        dropout_rate=checkpoint['dropout_rate']
+        hidden_dim=checkpoint.get('hidden_dim', 64),
+        dropout=checkpoint.get('dropout', 0.2),
     )
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
@@ -130,10 +131,9 @@ def close_pools():
         p.closeall()
 
 
-# --------------- Inference ---------------
+# 9 clean features (post leakage-fix — no delivery_time_hours / time_diff_hours / delivery_rating)
 CAT_COLS = ['package_type', 'vehicle_type', 'delivery_mode', 'region', 'weather_condition']
-NUM_COLS = ['distance_km', 'package_weight_kg', 'delivery_time_hours',
-            'expected_time_hours', 'delivery_rating', 'delivery_cost', 'time_diff_hours']
+NUM_COLS = ['distance_km', 'package_weight_kg', 'expected_time_hours', 'delivery_cost']
 FEATURE_COLS = CAT_COLS + NUM_COLS
 
 
@@ -176,8 +176,18 @@ def predict_from_pg_row(row: dict) -> dict:
     else:
         tensor_features = torch.tensor([encoded_features], dtype=torch.float32)
 
+    # Pass through analytics-only post-delivery columns (NOT fed to model)
+    # time_diff_hours = actual - expected delivery time; used for delay impact display only
+    for analytics_col in ['time_diff_hours', 'delivery_time_hours', 'delivery_rating']:
+        if analytics_col in row:
+            try:
+                decoded_features[analytics_col] = float(row[analytics_col] or 0.0)
+            except (TypeError, ValueError):
+                decoded_features[analytics_col] = 0.0
+
     with torch.no_grad():
-        prob = model(tensor_features).item()
+        # FL model outputs logits — apply sigmoid to get probability
+        prob = torch.sigmoid(model(tensor_features)).item()
 
     is_delayed = prob > global_threshold
     risk_level = "High" if prob > (global_threshold + 0.15) else "Medium" if prob > (global_threshold - 0.1) else "Low"
@@ -462,9 +472,10 @@ def _compute_supplier_metrics(cur, supplier_id: int) -> dict:
 
 
 def _risk_level_from_delay(delay_pct: float) -> str:
-    if delay_pct >= 0.55:
+    """Risk tiers calibrated to the dataset's ~26.6% average delay rate."""
+    if delay_pct >= 0.35:
         return "High"
-    elif delay_pct >= 0.30:
+    elif delay_pct >= 0.20:
         return "Medium"
     return "Low"
 
