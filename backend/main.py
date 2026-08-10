@@ -19,6 +19,7 @@ from models.delay_predictor import create_model
 from models.xgboost_model import XGBoostPredictor
 from explainability.shap_explainer import XGBoostExplainer, generate_explanation_dict
 from guidance.llm_agent import get_guidance
+from api.demand_forecast import forecast_demand
 
 from backend.guidance.rules import evaluate_rules
 from backend.auth.routes import router as auth_router, get_current_org
@@ -128,7 +129,26 @@ def load_assets():
         except Exception as e:
             print(f"  [WARN] Could not connect to {db_name}: {e}")
 
+    # --- XGBoost model + SHAP TreeExplainer ---
+    xgb_path = os.path.join(CHECKPOINTS_DIR, "xgboost_model.json")
+    if os.path.exists(xgb_path):
+        try:
+            xgb_predictor = XGBoostPredictor()
+            xgb_predictor.load(xgb_path)
+            app.state.xgb_model    = xgb_predictor.model
+            app.state.xgb_explainer = XGBoostExplainer(xgb_predictor.model, FEATURE_COLS)
+            print(f"  [OK] XGBoost model loaded from {xgb_path}")
+        except Exception as e:
+            print(f"  [WARN] XGBoost load failed: {e}")
+            app.state.xgb_model     = None
+            app.state.xgb_explainer = None
+    else:
+        print(f"  [WARN] XGBoost checkpoint not found at {xgb_path}")
+        app.state.xgb_model     = None
+        app.state.xgb_explainer = None
+
     print("Assets loaded successfully.")
+
 
 
 @app.on_event("shutdown")
@@ -675,93 +695,236 @@ def get_supplier_shipments(supplier_id: int, current_org: dict = Depends(get_cur
 
     return {"shipments": shipments, "total": len(shipments)}
 
+
+# ─── Demand Forecast ──────────────────────────────────────────────────────────
+
+@app.get("/api/demand/forecast")
+def get_demand_forecast(
+    weeks: int = 4,
+    current_org: dict = Depends(get_current_org),
+):
+    """
+    Return the org's LSTM demand forecast.
+    Org is determined entirely from the JWT — no org param accepted.
+    weeks: 1–12 (validated).
+    """
+    org_key = current_org.get("org_key", "")
+    if not org_key:
+        raise HTTPException(status_code=400, detail="Invalid org token")
+
+    if not (1 <= weeks <= 12):
+        raise HTTPException(status_code=422, detail="weeks must be between 1 and 12")
+
+    result = forecast_demand(org_key, n_weeks=weeks)
+    if "error" in result:
+        raise HTTPException(status_code=503, detail=result["error"])
+
+    return result
+
+
+# ─── Shipment Explanation (FL + XGBoost + SHAP + LLM) ───────────────────────
+
 class ExplainRequest(BaseModel):
-    features: dict
+    shipment_id: str  # e.g. "NVM-0198"
+
 
 @app.post("/api/predict/explain")
 def predict_explain(req: ExplainRequest, current_org: dict = Depends(get_current_org)):
-    """Runs FL model, XGBoost, SHAP, and LLM guidance for a single shipment."""
-    row = req.features
-    
-    # Run existing FL prediction logic
+    """Full AI pipeline: FL + XGBoost + SHAP + LLM/rules for a single shipment."""
+    org_key     = current_org.get("org_key", "")
+    postgres_db = current_org.get("postgres_db", "")
+    if not org_key or not postgres_db:
+        raise HTTPException(status_code=400, detail="Invalid org token")
+
+    # ── 1. Validate shipment_id format and verify org ownership ───────────────
+    expected_prefix = ORG_CONFIG.get(org_key, {}).get("prefix", "")
+    parts = req.shipment_id.split("-")
+    if len(parts) < 2 or parts[0].upper() != expected_prefix:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Shipment '{req.shipment_id}' does not belong to your organization.",
+        )
+    try:
+        row_id = int(parts[-1])
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid shipment ID format: '{req.shipment_id}'")
+
+    # ── 2. Fetch raw row from PostgreSQL ──────────────────────────────────────
+    if postgres_db not in _pg_pools:
+        raise HTTPException(status_code=503, detail="Database connection unavailable")
+
+    pool = _pg_pools[postgres_db]
+    conn = None
+    try:
+        conn = pool.getconn()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, package_type, vehicle_type, delivery_mode, region,
+                       weather_condition, distance_km, package_weight_kg,
+                       delivery_time_hours, expected_time_hours, delivery_rating,
+                       delivery_cost, time_diff_hours
+                FROM shipments WHERE id = %s
+                """,
+                (row_id,),
+            )
+            row = cur.fetchone()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Database unavailable: {e}")
+    finally:
+        if conn:
+            pool.putconn(conn)
+
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Shipment '{req.shipment_id}' not found")
+
+    row = dict(row)
+
+    # ── 3. FL prediction (feature engineering done inside predict_from_pg_row) ─
     fl_pred = predict_from_pg_row(row)
     fl_prob = fl_pred["delay_probability"]
-    
+
+    # ── 4. Encode features for XGBoost (same pipeline as FL) ─────────────────
     encoded_features = []
-    # Re-encode features exactly as done in predict_from_pg_row to pass to XGBoost
     for col in CAT_COLS:
         raw_val = str(row.get(col, "")).lower().strip()
-        if col in label_encoders:
-            le = label_encoders[col]
-            if raw_val in le.classes_:
-                encoded_features.append(float(le.transform([raw_val])[0]))
-            else:
-                encoded_features.append(0.0)
+        if col in label_encoders and raw_val in label_encoders[col].classes_:
+            encoded_features.append(float(label_encoders[col].transform([raw_val])[0]))
         else:
             encoded_features.append(0.0)
-            
     for col in NUM_COLS:
         try:
             encoded_features.append(float(row.get(col, 0.0)))
-        except:
+        except (TypeError, ValueError):
             encoded_features.append(0.0)
-            
-    # Apply scaler
+
     features_scaled = scaler.transform(np.array([encoded_features]))
-    
+
+    # ── 5. XGBoost prediction ─────────────────────────────────────────────────
     xgb_prob = 0.0
-    top_drivers = []
-    recommendations = []
-    shap_base_value = 0.5
-    
-    if hasattr(app.state, 'xgb_model') and app.state.xgb_model is not None:
+    if hasattr(app.state, "xgb_model") and app.state.xgb_model is not None:
         xgb_prob = float(app.state.xgb_model.predict_proba(features_scaled)[0, 1])
-        
-    if hasattr(app.state, 'xgb_explainer') and app.state.xgb_explainer is not None:
+
+    # ── 6. SHAP explanation ───────────────────────────────────────────────────
+    top_drivers     = []
+    guidance_result = {"recommendations": [], "guidance_source": "rule_based"}
+
+    if hasattr(app.state, "xgb_explainer") and app.state.xgb_explainer is not None:
         shap_values = app.state.xgb_explainer.explain_instances(features_scaled)
         if len(shap_values.shape) > 1:
             shap_values = shap_values[0]
-            
-        shap_base_value = getattr(app.state, 'xgb_base_value', 0.5)
-        
-        # We need to get feature_names from somewhere. Since XGBoost Explainer might not have them natively in app.state
-        # let's use the explicit feature names if available, else build from CAT_COLS and NUM_COLS
-        feature_names = getattr(app.state, 'feature_names', CAT_COLS + NUM_COLS)
-        
-        # For the raw values sent to LLM, ensure we match the feature names order
-        raw_values = [row.get(col, "") for col in CAT_COLS] + [row.get(col, 0.0) for col in NUM_COLS]
-        
+
+        feature_names = CAT_COLS + NUM_COLS
+        raw_values    = [row.get(col, "") for col in CAT_COLS] + [row.get(col, 0.0) for col in NUM_COLS]
+
         explanation_dict = generate_explanation_dict(
             feature_names=feature_names,
             feature_values=raw_values,
             shap_values=shap_values,
-            base_value=shap_base_value,
-            prediction_prob=xgb_prob
+            base_value=0.5,
+            prediction_prob=xgb_prob,
         )
-        
-        # Add context and rules to explanation dict for LLM
         explanation_dict["context"] = fl_pred["features"]
-        
-        # Trigger basic business rules from FL model
+
+        # Fix: use rule_id key, not non-existent "flag" key
         rule_res = evaluate_rules(fl_pred["shipment_state"])
-        explanation_dict["business_rules"] = [rule_res["message"]] if rule_res["flag"] != "green" else []
-        
+        explanation_dict["business_rules"] = (
+            [rule_res["message"]] if rule_res.get("rule_id") != "fallback" else []
+        )
         top_drivers = explanation_dict["explainability"]["top_drivers"]
-        
-        # Call LLM
-        recommendations = get_guidance(explanation_dict)
-    
+
+        # ── 7. LLM / rule-based guidance ──────────────────────────────────────
+        guidance_result = get_guidance(explanation_dict)
+
+    # ── 8. Build consensus + final response ───────────────────────────────────
+    fl_threshold  = global_threshold
+    xgb_threshold = 0.1973  # calibrated during training/08_train_xgboost.py
+
+    def _verdict(prob: float, threshold: float) -> str:
+        return "Delayed" if prob >= threshold else "On-Time"
+
     return {
-        "fl_probability": fl_prob,
-        "xgb_probability": xgb_prob,
-        "risk_level": fl_pred["risk_level"],
-        "threshold": global_threshold,
-        "top_drivers": top_drivers,
-        "recommendations": recommendations,
-        "shap_base_value": shap_base_value
+        "shipment_id": req.shipment_id,
+        "prediction": {
+            "risk_probability": round(fl_prob, 4),
+            "risk_level":       fl_pred["risk_level"],
+            "verdict":          _verdict(fl_prob, fl_threshold),
+        },
+        "consensus": [
+            {
+                "model":       "Federated Neural Network",
+                "probability": round(fl_prob, 4),
+                "verdict":     _verdict(fl_prob, fl_threshold),
+            },
+            {
+                "model":       "XGBoost (TreeSHAP)",
+                "probability": round(xgb_prob, 4),
+                "verdict":     _verdict(xgb_prob, xgb_threshold),
+            },
+        ],
+        "shap":            top_drivers,
+        "recommendations": guidance_result["recommendations"],
+        "guidance_source": guidance_result["guidance_source"],
     }
+
+
+# ─── Human-in-the-Loop Feedback ──────────────────────────────────────────────
+
+import json as _json
+import uuid
+from datetime import datetime, timezone
+
+
+class FeedbackRequest(BaseModel):
+    shipment_id:        str
+    fl_probability:     float
+    xgb_probability:    float
+    risk_level:         str
+    recommendations:    list
+    guidance_source:    str
+    decision:           str   # confirm | override | escalate
+    override_reason:    str = ""
+    alternative_action: str = ""
+
+
+VALID_DECISIONS = {"confirm", "override", "escalate"}
+
+
+@app.post("/api/guidance/feedback", status_code=201)
+def submit_feedback(req: FeedbackRequest, current_org: dict = Depends(get_current_org)):
+    """Log a manager's human decision about an AI recommendation to feedback_log.jsonl."""
+    if req.decision not in VALID_DECISIONS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"decision must be one of: {', '.join(sorted(VALID_DECISIONS))}",
+        )
+
+    record = {
+        "analysis_id":        str(uuid.uuid4()),
+        "org":                current_org.get("org_key", ""),
+        "shipment_id":        req.shipment_id,
+        "fl_probability":     req.fl_probability,
+        "xgb_probability":    req.xgb_probability,
+        "risk_level":         req.risk_level,
+        "recommendations":    req.recommendations,
+        "guidance_source":    req.guidance_source,
+        "decision":           req.decision,
+        "override_reason":    req.override_reason,
+        "alternative_action": req.alternative_action,
+        "timestamp":          datetime.now(timezone.utc).isoformat(),  # server-generated UTC
+    }
+
+    log_path = os.path.join(CHECKPOINTS_DIR, "feedback_log.jsonl")
+    try:
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(_json.dumps(record) + "\n")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to write feedback: {e}")
+
+    return {"status": "logged", "analysis_id": record["analysis_id"]}
 
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8001, reload=True)
+
