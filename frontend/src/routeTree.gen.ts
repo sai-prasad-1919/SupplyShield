@@ -15,6 +15,8 @@ import { Route as LoginRouteImport } from './routes/login'
 import { Route as RegisterRouteImport } from './routes/register'
 import { Route as AuthenticatedDashboardRouteImport } from './routes/_authenticated/dashboard'
 import { Route as AuthenticatedDemandRouteImport } from './routes/_authenticated/demand'
+import { Route as AuthenticatedFederatedRouteImport } from './routes/_authenticated/federated'
+import { Route as AuthenticatedFeedbackRouteImport } from './routes/_authenticated/feedback'
 import { Route as AuthenticatedGuidanceRouteImport } from './routes/_authenticated/guidance'
 import { Route as AuthenticatedSuppliersRouteImport } from './routes/_authenticated/suppliers'
 import { Route as AuthenticatedShipmentsIdRouteImport } from './routes/_authenticated/shipments.$id'
@@ -49,6 +51,16 @@ const AuthenticatedDemandRoute = AuthenticatedDemandRouteImport.update({
   path: '/demand',
   getParentRoute: () => AuthenticatedRoute,
 } as any)
+const AuthenticatedFederatedRoute = AuthenticatedFederatedRouteImport.update({
+  id: '/federated',
+  path: '/federated',
+  getParentRoute: () => AuthenticatedRoute,
+} as any)
+const AuthenticatedFeedbackRoute = AuthenticatedFeedbackRouteImport.update({
+  id: '/feedback',
+  path: '/feedback',
+  getParentRoute: () => AuthenticatedRoute,
+} as any)
 const AuthenticatedGuidanceRoute = AuthenticatedGuidanceRouteImport.update({
   id: '/guidance',
   path: '/guidance',
@@ -78,6 +90,8 @@ export interface FileRoutesByFullPath {
   '/register': typeof RegisterRoute
   '/dashboard': typeof AuthenticatedDashboardRoute
   '/demand': typeof AuthenticatedDemandRoute
+  '/federated': typeof AuthenticatedFederatedRoute
+  '/feedback': typeof AuthenticatedFeedbackRoute
   '/guidance': typeof AuthenticatedGuidanceRoute
   '/suppliers': typeof AuthenticatedSuppliersRouteWithChildren
   '/shipments/$id': typeof AuthenticatedShipmentsIdRoute
@@ -89,6 +103,8 @@ export interface FileRoutesByTo {
   '/register': typeof RegisterRoute
   '/dashboard': typeof AuthenticatedDashboardRoute
   '/demand': typeof AuthenticatedDemandRoute
+  '/federated': typeof AuthenticatedFederatedRoute
+  '/feedback': typeof AuthenticatedFeedbackRoute
   '/guidance': typeof AuthenticatedGuidanceRoute
   '/suppliers': typeof AuthenticatedSuppliersRouteWithChildren
   '/shipments/$id': typeof AuthenticatedShipmentsIdRoute
@@ -102,6 +118,8 @@ export interface FileRoutesById {
   '/register': typeof RegisterRoute
   '/_authenticated/dashboard': typeof AuthenticatedDashboardRoute
   '/_authenticated/demand': typeof AuthenticatedDemandRoute
+  '/_authenticated/federated': typeof AuthenticatedFederatedRoute
+  '/_authenticated/feedback': typeof AuthenticatedFeedbackRoute
   '/_authenticated/guidance': typeof AuthenticatedGuidanceRoute
   '/_authenticated/suppliers': typeof AuthenticatedSuppliersRouteWithChildren
   '/_authenticated/shipments/$id': typeof AuthenticatedShipmentsIdRoute
@@ -115,6 +133,8 @@ export interface FileRouteTypes {
     | '/register'
     | '/dashboard'
     | '/demand'
+    | '/federated'
+    | '/feedback'
     | '/guidance'
     | '/suppliers'
     | '/shipments/$id'
@@ -126,6 +146,8 @@ export interface FileRouteTypes {
     | '/register'
     | '/dashboard'
     | '/demand'
+    | '/federated'
+    | '/feedback'
     | '/guidance'
     | '/suppliers'
     | '/shipments/$id'
@@ -138,6 +160,8 @@ export interface FileRouteTypes {
     | '/register'
     | '/_authenticated/dashboard'
     | '/_authenticated/demand'
+    | '/_authenticated/federated'
+    | '/_authenticated/feedback'
     | '/_authenticated/guidance'
     | '/_authenticated/suppliers'
     | '/_authenticated/shipments/$id'
@@ -195,6 +219,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedDemandRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
+    '/_authenticated/federated': {
+      id: '/_authenticated/federated'
+      path: '/federated'
+      fullPath: '/federated'
+      preLoaderRoute: typeof AuthenticatedFederatedRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/feedback': {
+      id: '/_authenticated/feedback'
+      path: '/feedback'
+      fullPath: '/feedback'
+      preLoaderRoute: typeof AuthenticatedFeedbackRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
     '/_authenticated/guidance': {
       id: '/_authenticated/guidance'
       path: '/guidance'
@@ -243,6 +281,8 @@ const AuthenticatedSuppliersRouteWithChildren =
 interface AuthenticatedRouteChildren {
   AuthenticatedDashboardRoute: typeof AuthenticatedDashboardRoute
   AuthenticatedDemandRoute: typeof AuthenticatedDemandRoute
+  AuthenticatedFederatedRoute: typeof AuthenticatedFederatedRoute
+  AuthenticatedFeedbackRoute: typeof AuthenticatedFeedbackRoute
   AuthenticatedGuidanceRoute: typeof AuthenticatedGuidanceRoute
   AuthenticatedSuppliersRoute: typeof AuthenticatedSuppliersRouteWithChildren
   AuthenticatedShipmentsIdRoute: typeof AuthenticatedShipmentsIdRoute
@@ -251,6 +291,8 @@ interface AuthenticatedRouteChildren {
 const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
   AuthenticatedDashboardRoute: AuthenticatedDashboardRoute,
   AuthenticatedDemandRoute: AuthenticatedDemandRoute,
+  AuthenticatedFederatedRoute: AuthenticatedFederatedRoute,
+  AuthenticatedFeedbackRoute: AuthenticatedFeedbackRoute,
   AuthenticatedGuidanceRoute: AuthenticatedGuidanceRoute,
   AuthenticatedSuppliersRoute: AuthenticatedSuppliersRouteWithChildren,
   AuthenticatedShipmentsIdRoute: AuthenticatedShipmentsIdRoute,

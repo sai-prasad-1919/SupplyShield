@@ -31,3 +31,10 @@ data/partitions/
 
 # Ignore large checkpoints if needed (comment out if you want to push models)
 # checkpoints/*.pt
+
+# Temporary Scratchpad Scripts & Outputs
+ieee_audit.py
+ieee_audit2.py
+read_pdf.py
+*.pdf
+*out*.txt

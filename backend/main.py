@@ -4,6 +4,15 @@ Data served from per-org PostgreSQL databases (not CSV files).
 Per-org DB connection pools are initialised once at startup.
 """
 import os
+import sys
+
+# Ensure the project root (parent of 'backend/') is on sys.path so that
+# top-level packages (models, explainability, guidance, api, etc.) are found
+# regardless of which directory uvicorn is launched from.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -332,6 +341,8 @@ def get_kpis(current_org: dict = Depends(get_current_org)):
 
     high_risk = [s for s in shipments if s["prediction"]["risk_level"] == "High"]
     delayed   = [s for s in shipments if s["prediction"]["risk_level"] in ("High", "Medium")]
+    on_time   = [s for s in shipments if s["prediction"]["risk_level"] == "Low"]
+    
     total_delay = sum(
         s["features"].get("time_diff_hours", 0)
         for s in delayed
@@ -341,9 +352,61 @@ def get_kpis(current_org: dict = Depends(get_current_org)):
     delay_str = f"{avg_delay_hours / 24:.1f} days" if avg_delay_hours > 24 else f"{avg_delay_hours:.1f} hours"
 
     return {
+        "total_shipments": len(shipments),
+        "on_time_count": len(on_time),
+        "delayed_count": len(delayed),
         "high_risk_count": len(high_risk),
         "avg_delay": delay_str,
         "units_in_transit": f"{len(shipments) * 450:,}",
+    }
+
+@app.get("/api/federated/status")
+def get_federated_status():
+    """Returns FL training metadata and model sizes.
+    
+    fl_history.json has the shape:
+      {"loss": [{"round":1,"value":0.25},...], "auc": [...], "f1": [...], ...}
+    We zip them into per-round objects for the frontend chart.
+    """
+    import os
+    import json
+
+    fl_history_path = os.path.join(CHECKPOINTS_DIR, "fl_history.json")
+    if not os.path.exists(fl_history_path):
+        raise HTTPException(status_code=404, detail="FL history not found")
+
+    with open(fl_history_path, "r", encoding="utf-8") as f:
+        raw = json.load(f)  # dict of {metric: [{round, value}, ...]}
+
+    def get_kb(filename):
+        path = os.path.join(CHECKPOINTS_DIR, filename)
+        return round(os.path.getsize(path) / 1024, 2) if os.path.exists(path) else 0
+
+    # Build per-round list: [{"round":1, "loss":0.25, "auc":0.94, ...}, ...]
+    n_rounds = len(raw.get("loss", []))
+    convergence = []
+    for i in range(n_rounds):
+        entry = {"round": i + 1}
+        for metric, values in raw.items():
+            if i < len(values):
+                entry[metric] = values[i].get("value", 0)
+        convergence.append(entry)
+
+    final_metrics = convergence[-1] if convergence else {}
+
+    return {
+        "organizations": ["novamart", "titanelec", "swiftlog"],
+        "fl_rounds_completed": n_rounds,
+        "local_epochs_per_round": 5,
+        "final_metrics": final_metrics,
+        "convergence": convergence,
+        "model_sizes": {
+            "fl_model_kb": get_kb("federated_global_best.pt"),
+            "xgboost_kb":  get_kb("xgboost_model.json"),
+            "lstm_kb_per_org": get_kb("novamart_lstm.pt"),
+        },
+        "fl_threshold": 0.28604,
+        "xgb_threshold": 0.19732,
     }
 
 
@@ -923,8 +986,44 @@ def submit_feedback(req: FeedbackRequest, current_org: dict = Depends(get_curren
 
     return {"status": "logged", "analysis_id": record["analysis_id"]}
 
+@app.get("/api/guidance/feedback/history")
+def get_feedback_history(current_org: dict = Depends(get_current_org)):
+    """Return paginated feedback log entries for the current org."""
+    org_key = current_org.get("org_key", "")
+    log_path = os.path.join(CHECKPOINTS_DIR, "feedback_log.jsonl")
+    
+    entries = []
+    if os.path.exists(log_path):
+        with open(log_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    try:
+                        record = _json.loads(line)
+                        if record.get("org") == org_key:
+                            entries.append(record)
+                    except:
+                        pass
+                        
+    # Sort newest first
+    entries.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+    
+    summary = {
+        "confirm": sum(1 for e in entries if e.get("decision") == "confirm"),
+        "override": sum(1 for e in entries if e.get("decision") == "override"),
+        "escalate": sum(1 for e in entries if e.get("decision") == "escalate"),
+        "gemini_count": sum(1 for e in entries if e.get("guidance_source") == "gemini"),
+        "rule_based_count": sum(1 for e in entries if e.get("guidance_source") != "gemini"),
+    }
+    
+    return {
+        "total": len(entries),
+        "entries": entries,
+        "summary": summary
+    }
+
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8001, reload=True)
+    uvicorn.run("backend.main:app", host="0.0.0.0", port=8001, reload=True)
+
 

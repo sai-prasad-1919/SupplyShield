@@ -122,3 +122,12 @@ export const submitFeedback = async (payload: FeedbackPayload) => {
   return res.data; // { status: "logged", analysis_id: "..." }
 };
 
+export const fetchFeedbackHistory = async () => {
+  const res = await axios.get(`${API_URL}/guidance/feedback/history`, { headers: authHeader() });
+  return res.data; // { total, entries, summary }
+};
+
+export const fetchFederatedStatus = async () => {
+  const res = await axios.get(`${API_URL}/federated/status`, { headers: authHeader() });
+  return res.data; // { fl_rounds_completed, final_metrics, convergence, model_sizes, etc }
+};
