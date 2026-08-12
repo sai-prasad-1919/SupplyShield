@@ -99,7 +99,13 @@ def login(req: LoginRequest):
     Authenticate with Org ID + password.
     Returns a JWT valid for 24 hours.
     """
-    org = find_org_by_id(req.org_id.strip().upper())
+    try:
+        org = find_org_by_id(req.org_id.strip().upper())
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication service is temporarily unavailable. Please ensure MongoDB is running.",
+        )
 
     if not org:
         raise HTTPException(

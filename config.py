@@ -20,9 +20,10 @@ DATA_RAW_DIR = PROJECT_ROOT / os.getenv("DATA_RAW_DIR", "data/raw")
 DATA_PROCESSED_DIR = PROJECT_ROOT / os.getenv("DATA_PROCESSED_DIR", "data/processed")
 DATA_PARTITIONS_DIR = PROJECT_ROOT / os.getenv("DATA_PARTITIONS_DIR", "data/partitions")
 MODEL_DIR = PROJECT_ROOT / os.getenv("MODEL_DIR", "models/saved")
+CHECKPOINTS_DIR = PROJECT_ROOT / os.getenv("CHECKPOINTS_DIR", "checkpoints")
 
 # Ensure directories exist
-for d in [DATA_RAW_DIR, DATA_PROCESSED_DIR, DATA_PARTITIONS_DIR, MODEL_DIR]:
+for d in [DATA_RAW_DIR, DATA_PROCESSED_DIR, DATA_PARTITIONS_DIR, MODEL_DIR, CHECKPOINTS_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 # ──────────────────────────────────────────────

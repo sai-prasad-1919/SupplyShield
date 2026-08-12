@@ -80,7 +80,11 @@ class SupplyChainClient(fl.client.NumPyClient):
         metrics = evaluate(self.model, self.val_loader, self.device)
         
         # Return updated parameters, dataset size, and metrics
-        return self.get_parameters(config={}), len(self.train_loader.dataset), {"f1": metrics["f1"]}
+        return self.get_parameters(config={}), len(self.train_loader.dataset), {
+            "f1": metrics["f1"],
+            "precision": metrics["precision"],
+            "recall": metrics["recall"]
+        }
 
     def evaluate(self, parameters: NDArrays, config: dict[str, Scalar]) -> tuple[float, int, dict[str, Scalar]]:
         """Evaluate the provided parameters on the local validation set."""
@@ -93,11 +97,15 @@ class SupplyChainClient(fl.client.NumPyClient):
         
         return metrics["loss"], len(self.val_loader.dataset), {
             "accuracy": metrics["accuracy"],
+            "precision": metrics["precision"],
+            "recall": metrics["recall"],
             "f1": metrics["f1"],
             "auc": metrics["auc"],
+            "test_acc": test_metrics["accuracy"],
+            "test_precision": test_metrics["precision"],
+            "test_recall": test_metrics["recall"],
             "test_f1": test_metrics["f1"],
-            "test_auc": test_metrics["auc"],
-            "test_acc": test_metrics["accuracy"]
+            "test_auc": test_metrics["auc"]
         }
 
 

@@ -1,9 +1,10 @@
 import React from 'react'
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
-import { fetchShipments, fetchKpis } from '../../lib/api'
+import { fetchShipments, fetchKpis, fetchFederatedStatus, fetchFeedbackHistory } from '../../lib/api'
 import { KpiCard } from '../../components/KpiCard'
 import { RiskBadge } from '../../components/RiskBadge'
+import { BrainIcon, ClipboardIcon } from '../../components/Icons'
 
 export const Route = createFileRoute('/_authenticated/dashboard')({
   component: Dashboard,
@@ -22,6 +23,18 @@ function Dashboard() {
     queryFn: () => fetchKpis(),
   })
 
+  const { data: flStatus } = useQuery({
+    queryKey: ['federated-status'],
+    queryFn: fetchFederatedStatus,
+    staleTime: 5 * 60 * 1000,
+  })
+
+  const { data: feedbackData } = useQuery({
+    queryKey: ['feedback-history'],
+    queryFn: fetchFeedbackHistory,
+    staleTime: 60 * 1000,
+  })
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -34,6 +47,46 @@ function Dashboard() {
         <KpiCard label="High Risk Shipments" value={kpisLoading ? '...' : kpis?.high_risk_count} />
         <KpiCard label="Average Delay Impact" value={kpisLoading ? '...' : kpis?.avg_delay} />
         <KpiCard label="Units in Transit" value={kpisLoading ? '...' : kpis?.units_in_transit} />
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <KpiCard label="Total Shipments" value={kpisLoading ? '...' : kpis?.total_shipments} />
+        <KpiCard label="On-Time Count" value={kpisLoading ? '...' : kpis?.on_time_count} />
+        <KpiCard label="Delayed Count" value={kpisLoading ? '...' : kpis?.delayed_count} />
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div 
+          onClick={() => navigate({ to: '/federated' })}
+          className="glass-card p-5 cursor-pointer hover:bg-[var(--sidebar-accent)] transition-colors flex items-center justify-between"
+        >
+          <div>
+            <div className="flex items-center gap-2 mb-1">
+              <BrainIcon className="w-5 h-5 text-primary" />
+              <h3 className="font-semibold text-white">Federated Model</h3>
+            </div>
+            <p className="text-sm text-slate-400">
+              {flStatus ? `Global AUC: ${(flStatus.final_metrics?.auc * 100).toFixed(2)}% | Rounds: ${flStatus.fl_rounds_completed}` : 'Loading FL Status...'}
+            </p>
+          </div>
+          <div className="text-slate-500">→</div>
+        </div>
+
+        <div 
+          onClick={() => navigate({ to: '/feedback' })}
+          className="glass-card p-5 cursor-pointer hover:bg-[var(--sidebar-accent)] transition-colors flex items-center justify-between"
+        >
+          <div>
+            <div className="flex items-center gap-2 mb-1">
+              <ClipboardIcon className="w-5 h-5 text-emerald-400" />
+              <h3 className="font-semibold text-white">Feedback History</h3>
+            </div>
+            <p className="text-sm text-slate-400">
+              {feedbackData ? `${feedbackData.total} Decisions Logged | Confirm Rate: ${((feedbackData.summary?.confirm / feedbackData.total) * 100 || 0).toFixed(0)}%` : 'Loading Feedback Log...'}
+            </p>
+          </div>
+          <div className="text-slate-500">→</div>
+        </div>
       </div>
 
       {/* Shipments Table */}

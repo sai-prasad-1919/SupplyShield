@@ -82,3 +82,52 @@ export const fetchSupplierShipments = async (id: number | string) => {
   const res = await axios.get(`${API_URL}/supplier/${id}/shipments`, { headers: authHeader() });
   return res.data; // { shipments: [...], total: N }
 };
+
+// ---------- Demand Forecast ----------
+export const fetchDemandForecast = async (weeks = 4) => {
+  const res = await axios.get(`${API_URL}/demand/forecast`, {
+    params: { weeks },
+    headers: authHeader(),
+  });
+  return res.data; // { org, weeks_ahead, history, forecast, forecast_start_date, model_info }
+};
+
+// ---------- Shipment Explanation (AI + SHAP + LLM) ----------
+export const explainShipment = async (shipmentId: string) => {
+  const res = await axios.post(
+    `${API_URL}/predict/explain`,
+    { shipment_id: shipmentId },
+    { headers: authHeader() }
+  );
+  return res.data; // { shipment_id, prediction, consensus, shap, recommendations, guidance_source }
+};
+
+// ---------- Human-in-the-Loop Feedback ----------
+export interface FeedbackPayload {
+  shipment_id: string;
+  fl_probability: number;
+  xgb_probability: number;
+  risk_level: string;
+  recommendations: any[];
+  guidance_source: string;
+  decision: 'confirm' | 'override' | 'escalate';
+  override_reason?: string;
+  alternative_action?: string;
+}
+
+export const submitFeedback = async (payload: FeedbackPayload) => {
+  const res = await axios.post(`${API_URL}/guidance/feedback`, payload, {
+    headers: authHeader(),
+  });
+  return res.data; // { status: "logged", analysis_id: "..." }
+};
+
+export const fetchFeedbackHistory = async () => {
+  const res = await axios.get(`${API_URL}/guidance/feedback/history`, { headers: authHeader() });
+  return res.data; // { total, entries, summary }
+};
+
+export const fetchFederatedStatus = async () => {
+  const res = await axios.get(`${API_URL}/federated/status`, { headers: authHeader() });
+  return res.data; // { fl_rounds_completed, final_metrics, convergence, model_sizes, etc }
+};

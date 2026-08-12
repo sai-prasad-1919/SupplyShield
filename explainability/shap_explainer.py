@@ -123,6 +123,14 @@ class DelayExplainer:
         return dict(sorted(importance.items(), key=lambda item: item[1], reverse=True))
 
 
+def _safe_val(val):
+    """Convert feature value to float if numeric, else keep as string for categoricals."""
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return str(val)
+
+
 def generate_explanation_dict(
     feature_names: list[str], 
     feature_values: np.ndarray, 
@@ -135,7 +143,7 @@ def generate_explanation_dict(
     
     Args:
         feature_names: List of feature names.
-        feature_values: The raw/scaled values for a single instance.
+        feature_values: The raw feature values for a single instance (may include strings for categoricals).
         shap_values: The SHAP values for a single instance.
         base_value: The expected model output over the background dataset.
         prediction_prob: The final predicted probability of delay.
@@ -145,7 +153,7 @@ def generate_explanation_dict(
     for name, val, shap_val in zip(feature_names, feature_values, shap_values):
         contributions.append({
             "feature": name,
-            "value": float(val),
+            "value": _safe_val(val),   # keeps 'groceries' as string, 500.0 as float
             "impact": float(shap_val),
             "direction": "increases_delay" if shap_val > 0 else "decreases_delay"
         })
@@ -160,7 +168,21 @@ def generate_explanation_dict(
         },
         "explainability": {
             "base_value": float(base_value),
-            "top_drivers": contributions[:3],  # Top 3 most impactful features
+            "top_drivers": contributions[:5],  # Top 5 most impactful features
             "all_contributions": contributions
         }
     }
+
+
+class XGBoostExplainer:
+    """Wrapper for SHAP explainability on XGBoost model."""
+    def __init__(self, model, feature_names: list[str]):
+        # model is the xgb.XGBClassifier
+        self.explainer = shap.TreeExplainer(model)
+        self.feature_names = feature_names
+        
+    def explain_instances(self, instances: np.ndarray) -> np.ndarray:
+        # returns log-odds contributions
+        shap_values = self.explainer.shap_values(instances)
+        return shap_values
+

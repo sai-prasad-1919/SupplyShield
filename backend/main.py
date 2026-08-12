@@ -4,6 +4,15 @@ Data served from per-org PostgreSQL databases (not CSV files).
 Per-org DB connection pools are initialised once at startup.
 """
 import os
+import sys
+
+# Ensure the project root (parent of 'backend/') is on sys.path so that
+# top-level packages (models, explainability, guidance, api, etc.) are found
+# regardless of which directory uvicorn is launched from.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -13,6 +22,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from psycopg2 import pool as pg_pool
 from psycopg2.extras import RealDictCursor
 from typing import Optional
+from pydantic import BaseModel
+import passlib.hash as phash
+from models.delay_predictor import create_model
+from models.xgboost_model import XGBoostPredictor
+from explainability.shap_explainer import XGBoostExplainer, generate_explanation_dict
+from guidance.llm_agent import get_guidance
+from api.demand_forecast import forecast_demand
 
 from backend.guidance.rules import evaluate_rules
 from backend.auth.routes import router as auth_router, get_current_org
@@ -26,8 +42,8 @@ app = FastAPI(title="SupplyShield API v2", version="2.0.0")
 # CORS must be registered BEFORE routes
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -85,13 +101,14 @@ def load_assets():
     global model, label_encoders, scaler, global_threshold, _pg_pools
     print("Loading assets for SupplyShield v2...")
 
-    # --- ML model ---
+    # --- ML model (FL architecture: hidden_dim=64, no BatchNorm, outputs logits) ---
     model_path = os.path.join(CHECKPOINTS_DIR, "federated_global_best.pt")
     checkpoint = torch.load(model_path, map_location=torch.device('cpu'), weights_only=True)
-    model = DelayPredictor(
+    from models.delay_predictor import DelayPredictor as FLDelayPredictor
+    model = FLDelayPredictor(
         input_dim=checkpoint['input_dim'],
-        hidden_dims=checkpoint['hidden_dims'],
-        dropout_rate=checkpoint['dropout_rate']
+        hidden_dim=checkpoint.get('hidden_dim', 64),
+        dropout=checkpoint.get('dropout', 0.2),
     )
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
@@ -121,7 +138,26 @@ def load_assets():
         except Exception as e:
             print(f"  [WARN] Could not connect to {db_name}: {e}")
 
+    # --- XGBoost model + SHAP TreeExplainer ---
+    xgb_path = os.path.join(CHECKPOINTS_DIR, "xgboost_model.json")
+    if os.path.exists(xgb_path):
+        try:
+            xgb_predictor = XGBoostPredictor()
+            xgb_predictor.load(xgb_path)
+            app.state.xgb_model    = xgb_predictor.model
+            app.state.xgb_explainer = XGBoostExplainer(xgb_predictor.model, FEATURE_COLS)
+            print(f"  [OK] XGBoost model loaded from {xgb_path}")
+        except Exception as e:
+            print(f"  [WARN] XGBoost load failed: {e}")
+            app.state.xgb_model     = None
+            app.state.xgb_explainer = None
+    else:
+        print(f"  [WARN] XGBoost checkpoint not found at {xgb_path}")
+        app.state.xgb_model     = None
+        app.state.xgb_explainer = None
+
     print("Assets loaded successfully.")
+
 
 
 @app.on_event("shutdown")
@@ -130,10 +166,9 @@ def close_pools():
         p.closeall()
 
 
-# --------------- Inference ---------------
+# 9 clean features (post leakage-fix — no delivery_time_hours / time_diff_hours / delivery_rating)
 CAT_COLS = ['package_type', 'vehicle_type', 'delivery_mode', 'region', 'weather_condition']
-NUM_COLS = ['distance_km', 'package_weight_kg', 'delivery_time_hours',
-            'expected_time_hours', 'delivery_rating', 'delivery_cost', 'time_diff_hours']
+NUM_COLS = ['distance_km', 'package_weight_kg', 'expected_time_hours', 'delivery_cost']
 FEATURE_COLS = CAT_COLS + NUM_COLS
 
 
@@ -176,8 +211,18 @@ def predict_from_pg_row(row: dict) -> dict:
     else:
         tensor_features = torch.tensor([encoded_features], dtype=torch.float32)
 
+    # Pass through analytics-only post-delivery columns (NOT fed to model)
+    # time_diff_hours = actual - expected delivery time; used for delay impact display only
+    for analytics_col in ['time_diff_hours', 'delivery_time_hours', 'delivery_rating']:
+        if analytics_col in row:
+            try:
+                decoded_features[analytics_col] = float(row[analytics_col] or 0.0)
+            except (TypeError, ValueError):
+                decoded_features[analytics_col] = 0.0
+
     with torch.no_grad():
-        prob = model(tensor_features).item()
+        # FL model outputs logits — apply sigmoid to get probability
+        prob = torch.sigmoid(model(tensor_features)).item()
 
     is_delayed = prob > global_threshold
     risk_level = "High" if prob > (global_threshold + 0.15) else "Medium" if prob > (global_threshold - 0.1) else "Low"
@@ -296,6 +341,8 @@ def get_kpis(current_org: dict = Depends(get_current_org)):
 
     high_risk = [s for s in shipments if s["prediction"]["risk_level"] == "High"]
     delayed   = [s for s in shipments if s["prediction"]["risk_level"] in ("High", "Medium")]
+    on_time   = [s for s in shipments if s["prediction"]["risk_level"] == "Low"]
+    
     total_delay = sum(
         s["features"].get("time_diff_hours", 0)
         for s in delayed
@@ -305,9 +352,61 @@ def get_kpis(current_org: dict = Depends(get_current_org)):
     delay_str = f"{avg_delay_hours / 24:.1f} days" if avg_delay_hours > 24 else f"{avg_delay_hours:.1f} hours"
 
     return {
+        "total_shipments": len(shipments),
+        "on_time_count": len(on_time),
+        "delayed_count": len(delayed),
         "high_risk_count": len(high_risk),
         "avg_delay": delay_str,
         "units_in_transit": f"{len(shipments) * 450:,}",
+    }
+
+@app.get("/api/federated/status")
+def get_federated_status():
+    """Returns FL training metadata and model sizes.
+    
+    fl_history.json has the shape:
+      {"loss": [{"round":1,"value":0.25},...], "auc": [...], "f1": [...], ...}
+    We zip them into per-round objects for the frontend chart.
+    """
+    import os
+    import json
+
+    fl_history_path = os.path.join(CHECKPOINTS_DIR, "fl_history.json")
+    if not os.path.exists(fl_history_path):
+        raise HTTPException(status_code=404, detail="FL history not found")
+
+    with open(fl_history_path, "r", encoding="utf-8") as f:
+        raw = json.load(f)  # dict of {metric: [{round, value}, ...]}
+
+    def get_kb(filename):
+        path = os.path.join(CHECKPOINTS_DIR, filename)
+        return round(os.path.getsize(path) / 1024, 2) if os.path.exists(path) else 0
+
+    # Build per-round list: [{"round":1, "loss":0.25, "auc":0.94, ...}, ...]
+    n_rounds = len(raw.get("loss", []))
+    convergence = []
+    for i in range(n_rounds):
+        entry = {"round": i + 1}
+        for metric, values in raw.items():
+            if i < len(values):
+                entry[metric] = values[i].get("value", 0)
+        convergence.append(entry)
+
+    final_metrics = convergence[-1] if convergence else {}
+
+    return {
+        "organizations": ["novamart", "titanelec", "swiftlog"],
+        "fl_rounds_completed": n_rounds,
+        "local_epochs_per_round": 5,
+        "final_metrics": final_metrics,
+        "convergence": convergence,
+        "model_sizes": {
+            "fl_model_kb": get_kb("federated_global_best.pt"),
+            "xgboost_kb":  get_kb("xgboost_model.json"),
+            "lstm_kb_per_org": get_kb("novamart_lstm.pt"),
+        },
+        "fl_threshold": 0.28604,
+        "xgb_threshold": 0.19732,
     }
 
 
@@ -462,9 +561,10 @@ def _compute_supplier_metrics(cur, supplier_id: int) -> dict:
 
 
 def _risk_level_from_delay(delay_pct: float) -> str:
-    if delay_pct >= 0.55:
+    """Risk tiers calibrated to the dataset's ~26.6% average delay rate."""
+    if delay_pct >= 0.35:
         return "High"
-    elif delay_pct >= 0.30:
+    elif delay_pct >= 0.20:
         return "Medium"
     return "Low"
 
@@ -659,6 +759,271 @@ def get_supplier_shipments(supplier_id: int, current_org: dict = Depends(get_cur
     return {"shipments": shipments, "total": len(shipments)}
 
 
+# ─── Demand Forecast ──────────────────────────────────────────────────────────
+
+@app.get("/api/demand/forecast")
+def get_demand_forecast(
+    weeks: int = 4,
+    current_org: dict = Depends(get_current_org),
+):
+    """
+    Return the org's LSTM demand forecast.
+    Org is determined entirely from the JWT — no org param accepted.
+    weeks: 1–12 (validated).
+    """
+    org_key = current_org.get("org_key", "")
+    if not org_key:
+        raise HTTPException(status_code=400, detail="Invalid org token")
+
+    if not (1 <= weeks <= 12):
+        raise HTTPException(status_code=422, detail="weeks must be between 1 and 12")
+
+    result = forecast_demand(org_key, n_weeks=weeks)
+    if "error" in result:
+        raise HTTPException(status_code=503, detail=result["error"])
+
+    return result
+
+
+# ─── Shipment Explanation (FL + XGBoost + SHAP + LLM) ───────────────────────
+
+class ExplainRequest(BaseModel):
+    shipment_id: str  # e.g. "NVM-0198"
+
+
+@app.post("/api/predict/explain")
+def predict_explain(req: ExplainRequest, current_org: dict = Depends(get_current_org)):
+    """Full AI pipeline: FL + XGBoost + SHAP + LLM/rules for a single shipment."""
+    org_key     = current_org.get("org_key", "")
+    postgres_db = current_org.get("postgres_db", "")
+    if not org_key or not postgres_db:
+        raise HTTPException(status_code=400, detail="Invalid org token")
+
+    # ── 1. Validate shipment_id format and verify org ownership ───────────────
+    expected_prefix = ORG_CONFIG.get(org_key, {}).get("prefix", "")
+    parts = req.shipment_id.split("-")
+    if len(parts) < 2 or parts[0].upper() != expected_prefix:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Shipment '{req.shipment_id}' does not belong to your organization.",
+        )
+    try:
+        row_id = int(parts[-1])
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid shipment ID format: '{req.shipment_id}'")
+
+    # ── 2. Fetch raw row from PostgreSQL ──────────────────────────────────────
+    if postgres_db not in _pg_pools:
+        raise HTTPException(status_code=503, detail="Database connection unavailable")
+
+    pool = _pg_pools[postgres_db]
+    conn = None
+    try:
+        conn = pool.getconn()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, package_type, vehicle_type, delivery_mode, region,
+                       weather_condition, distance_km, package_weight_kg,
+                       delivery_time_hours, expected_time_hours, delivery_rating,
+                       delivery_cost, time_diff_hours
+                FROM shipments WHERE id = %s
+                """,
+                (row_id,),
+            )
+            row = cur.fetchone()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Database unavailable: {e}")
+    finally:
+        if conn:
+            pool.putconn(conn)
+
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Shipment '{req.shipment_id}' not found")
+
+    row = dict(row)
+
+    # ── 3. FL prediction (feature engineering done inside predict_from_pg_row) ─
+    fl_pred = predict_from_pg_row(row)
+    fl_prob = fl_pred["delay_probability"]
+
+    # ── 4. Encode features for XGBoost (same pipeline as FL) ─────────────────
+    encoded_features = []
+    for col in CAT_COLS:
+        raw_val = str(row.get(col, "")).lower().strip()
+        if col in label_encoders and raw_val in label_encoders[col].classes_:
+            encoded_features.append(float(label_encoders[col].transform([raw_val])[0]))
+        else:
+            encoded_features.append(0.0)
+    for col in NUM_COLS:
+        try:
+            encoded_features.append(float(row.get(col, 0.0)))
+        except (TypeError, ValueError):
+            encoded_features.append(0.0)
+
+    features_scaled = scaler.transform(np.array([encoded_features]))
+
+    # ── 5. XGBoost prediction ─────────────────────────────────────────────────
+    xgb_prob = 0.0
+    if hasattr(app.state, "xgb_model") and app.state.xgb_model is not None:
+        xgb_prob = float(app.state.xgb_model.predict_proba(features_scaled)[0, 1])
+
+    # ── 6. SHAP explanation ───────────────────────────────────────────────────
+    top_drivers     = []
+    guidance_result = {"recommendations": [], "guidance_source": "rule_based"}
+
+    if hasattr(app.state, "xgb_explainer") and app.state.xgb_explainer is not None:
+        shap_values = app.state.xgb_explainer.explain_instances(features_scaled)
+        if len(shap_values.shape) > 1:
+            shap_values = shap_values[0]
+
+        feature_names = CAT_COLS + NUM_COLS
+        raw_values    = [row.get(col, "") for col in CAT_COLS] + [row.get(col, 0.0) for col in NUM_COLS]
+
+        explanation_dict = generate_explanation_dict(
+            feature_names=feature_names,
+            feature_values=raw_values,
+            shap_values=shap_values,
+            base_value=0.5,
+            prediction_prob=xgb_prob,
+        )
+        explanation_dict["context"] = fl_pred["features"]
+
+        # Fix: use rule_id key, not non-existent "flag" key
+        rule_res = evaluate_rules(fl_pred["shipment_state"])
+        explanation_dict["business_rules"] = (
+            [rule_res["message"]] if rule_res.get("rule_id") != "fallback" else []
+        )
+        top_drivers = explanation_dict["explainability"]["top_drivers"]
+
+        # ── 7. LLM / rule-based guidance ──────────────────────────────────────
+        guidance_result = get_guidance(explanation_dict)
+
+    # ── 8. Build consensus + final response ───────────────────────────────────
+    fl_threshold  = global_threshold
+    xgb_threshold = 0.1973  # calibrated during training/08_train_xgboost.py
+
+    def _verdict(prob: float, threshold: float) -> str:
+        return "Delayed" if prob >= threshold else "On-Time"
+
+    return {
+        "shipment_id": req.shipment_id,
+        "prediction": {
+            "risk_probability": round(fl_prob, 4),
+            "risk_level":       fl_pred["risk_level"],
+            "verdict":          _verdict(fl_prob, fl_threshold),
+        },
+        "consensus": [
+            {
+                "model":       "Federated Neural Network",
+                "probability": round(fl_prob, 4),
+                "verdict":     _verdict(fl_prob, fl_threshold),
+            },
+            {
+                "model":       "XGBoost (TreeSHAP)",
+                "probability": round(xgb_prob, 4),
+                "verdict":     _verdict(xgb_prob, xgb_threshold),
+            },
+        ],
+        "shap":            top_drivers,
+        "recommendations": guidance_result["recommendations"],
+        "guidance_source": guidance_result["guidance_source"],
+    }
+
+
+# ─── Human-in-the-Loop Feedback ──────────────────────────────────────────────
+
+import json as _json
+import uuid
+from datetime import datetime, timezone
+
+
+class FeedbackRequest(BaseModel):
+    shipment_id:        str
+    fl_probability:     float
+    xgb_probability:    float
+    risk_level:         str
+    recommendations:    list
+    guidance_source:    str
+    decision:           str   # confirm | override | escalate
+    override_reason:    str = ""
+    alternative_action: str = ""
+
+
+VALID_DECISIONS = {"confirm", "override", "escalate"}
+
+
+@app.post("/api/guidance/feedback", status_code=201)
+def submit_feedback(req: FeedbackRequest, current_org: dict = Depends(get_current_org)):
+    """Log a manager's human decision about an AI recommendation to feedback_log.jsonl."""
+    if req.decision not in VALID_DECISIONS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"decision must be one of: {', '.join(sorted(VALID_DECISIONS))}",
+        )
+
+    record = {
+        "analysis_id":        str(uuid.uuid4()),
+        "org":                current_org.get("org_key", ""),
+        "shipment_id":        req.shipment_id,
+        "fl_probability":     req.fl_probability,
+        "xgb_probability":    req.xgb_probability,
+        "risk_level":         req.risk_level,
+        "recommendations":    req.recommendations,
+        "guidance_source":    req.guidance_source,
+        "decision":           req.decision,
+        "override_reason":    req.override_reason,
+        "alternative_action": req.alternative_action,
+        "timestamp":          datetime.now(timezone.utc).isoformat(),  # server-generated UTC
+    }
+
+    log_path = os.path.join(CHECKPOINTS_DIR, "feedback_log.jsonl")
+    try:
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(_json.dumps(record) + "\n")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to write feedback: {e}")
+
+    return {"status": "logged", "analysis_id": record["analysis_id"]}
+
+@app.get("/api/guidance/feedback/history")
+def get_feedback_history(current_org: dict = Depends(get_current_org)):
+    """Return paginated feedback log entries for the current org."""
+    org_key = current_org.get("org_key", "")
+    log_path = os.path.join(CHECKPOINTS_DIR, "feedback_log.jsonl")
+    
+    entries = []
+    if os.path.exists(log_path):
+        with open(log_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    try:
+                        record = _json.loads(line)
+                        if record.get("org") == org_key:
+                            entries.append(record)
+                    except:
+                        pass
+                        
+    # Sort newest first
+    entries.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+    
+    summary = {
+        "confirm": sum(1 for e in entries if e.get("decision") == "confirm"),
+        "override": sum(1 for e in entries if e.get("decision") == "override"),
+        "escalate": sum(1 for e in entries if e.get("decision") == "escalate"),
+        "gemini_count": sum(1 for e in entries if e.get("guidance_source") == "gemini"),
+        "rule_based_count": sum(1 for e in entries if e.get("guidance_source") != "gemini"),
+    }
+    
+    return {
+        "total": len(entries),
+        "entries": entries,
+        "summary": summary
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8001, reload=True)
+    uvicorn.run("backend.main:app", host="0.0.0.0", port=8001, reload=True)
+
+

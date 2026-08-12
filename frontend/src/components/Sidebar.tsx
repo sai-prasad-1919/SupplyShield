@@ -1,6 +1,6 @@
 import React from 'react';
 import { Link, useLocation } from '@tanstack/react-router';
-import { TruckIcon, FactoryIcon, ActivityIcon, InfoIcon, SettingsIcon, ShieldCheckIcon } from './Icons';
+import { TruckIcon, FactoryIcon, ActivityIcon, InfoIcon, SettingsIcon, ShieldCheckIcon, BrainIcon, ClipboardIcon } from './Icons';
 
 export const Sidebar = () => {
   const location = useLocation();
@@ -10,6 +10,8 @@ export const Sidebar = () => {
     { to: '/suppliers', label: 'Suppliers', icon: FactoryIcon },
     { to: '/demand', label: 'Demand', icon: ActivityIcon },
     { to: '/guidance', label: 'Guidance', icon: InfoIcon },
+    { to: '/federated', label: 'FL Model', icon: BrainIcon },
+    { to: '/feedback', label: 'Feedback', icon: ClipboardIcon },
   ];
 
   return (
