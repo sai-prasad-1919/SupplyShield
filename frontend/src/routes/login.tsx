@@ -3,6 +3,8 @@ import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { ShieldCheckIcon } from '../components/Icons'
 import { loginOrg, saveSession } from '../lib/api'
 
+import { ArrowLeft } from 'lucide-react'
+
 export const Route = createFileRoute('/login')({
   component: Login,
 })
@@ -35,7 +37,16 @@ function Login() {
   }
 
   return (
-    <div className="min-h-screen bg-background flex flex-col items-center justify-center p-6">
+    <div className="min-h-screen bg-background flex flex-col items-center justify-center p-6 relative">
+      {/* Back Button */}
+      <Link
+        to="/"
+        className="absolute top-6 left-6 flex items-center text-sm font-medium text-slate-400 hover:text-white transition-colors"
+      >
+        <ArrowLeft className="w-4 h-4 mr-2" />
+        Back to Home
+      </Link>
+
       {/* Logo */}
       <div className="flex items-center space-x-3 text-white mb-10">
         <ShieldCheckIcon className="w-9 h-9 text-primary" />
