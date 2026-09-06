@@ -24,7 +24,7 @@ function Landing() {
         
         <h1 className="text-5xl font-extrabold tracking-tight text-white leading-tight">
           Predict supply chain disruptions <br className="hidden md:block"/>
-          <span className="text-transparent bg-clip-text bg-gradient-to-r from-primary to-blue-400">
+          <span className="text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-blue-200">
             without sharing your data
           </span>
         </h1>
@@ -37,9 +37,6 @@ function Landing() {
           <Link to="/login" className="px-8 py-3 rounded-md bg-primary text-white font-medium hover:bg-primary/90 transition-colors">
             Enter Dashboard
           </Link>
-          <button className="px-8 py-3 rounded-md border border-border bg-[var(--card)] text-white font-medium hover:bg-border transition-colors">
-            Read Docs
-          </button>
         </div>
       </div>
     </div>
