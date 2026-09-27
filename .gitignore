@@ -1,40 +1,121 @@
-# Environments
+# ============================================================
+# SupplyShield — .gitignore
+# ============================================================
+
+# ── Python ───────────────────────────────────────────────────
 venv/
 env/
-.env
-
-# Python
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
-
-# Node
-node_modules/
+*.egg-info/
 dist/
 build/
-.npm/
+.Python
 
-# OS Files
+# ── Environment & Secrets ────────────────────────────────────
+.env
+*.env.*
+!.env.example
+
+# ── Node / Frontend ──────────────────────────────────────────
+node_modules/
+frontend/dist/
+frontend/build/
+.npm/
+*.lock
+
+# ── OS Files ─────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
+desktop.ini
 
-# Data 
+# ── IDEs ─────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ── Paper & Research Files ───────────────────────────────────
+# The paper folder contains PDFs, LaTeX, and draft files
+# that should not be in the main codebase repository
+paper/
+
+# ── PDF Files ────────────────────────────────────────────────
+*.pdf
+
+# ── Scratchpad / Audit / One-off Scripts ─────────────────────
+# These were used during development and are not part of the system
+ieee_audit.py
+ieee_audit2.py
+ieee_audit2_out.txt
+ieee_audit_out.txt
+read_pdf.py
+pdf_out.txt
+pdf_output.txt
+pdf_output_utf8.txt
+*out*.txt
+*_out.txt
+*_output.txt
+
+# ── One-off Generation Scripts ───────────────────────────────
+generate_full_metrics_report.py
+generate_missing_figures.py
+generate_mock_data.py
+generate_scaler.py
+freeze_baseline.py
+recalibrate.py
+verify_setup.py
+
+# ── Test / Debug Scripts ─────────────────────────────────────
+test_explain_endpoint.py
+test_*.py
+
+# ── Section Draft Markdown Files ─────────────────────────────
+section_*.md
+
+# ── Data Files ───────────────────────────────────────────────
 data/raw/
 data/processed/
 data/partitions/
 *.csv
 
-# IDEs
-.idea/
-.vscode/
+# ── Saved Models & Checkpoints ───────────────────────────────
+# Uncomment the lines below if you do NOT want to push model weights
+# models/saved/
+# checkpoints/
+*.pt
+*.pth
+*.pkl
+*.joblib
 
-# Ignore large checkpoints if needed (comment out if you want to push models)
-# checkpoints/*.pt
+# ── Reports & Generated Figures ──────────────────────────────
+reports/
+*.png
+*.jpg
+*.jpeg
+*.svg
 
-# Temporary Scratchpad Scripts & Outputs
-ieee_audit.py
-ieee_audit2.py
-read_pdf.py
-*.pdf
-*out*.txt
+# ── Notebooks ────────────────────────────────────────────────
+notebooks/
+*.ipynb
+.ipynb_checkpoints/
+
+# ── Logs ─────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Frontend Build & Utility Scripts ────────────────────────
+frontend/build_pdf.js
+frontend/screenshot_all_pages.js
+frontend/screenshots/
+frontend/.tanstack/
+frontend/tsconfig.json
+
+# ── Feedback / Runtime Logs ──────────────────────────────────
+checkpoints/feedback_log.jsonl
+
+# ── Docs (auto-generated) ────────────────────────────────────
+docs/
+
